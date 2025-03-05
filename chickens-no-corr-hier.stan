@@ -5,7 +5,7 @@ data {
   vector[N] z;
   vector[N] se;
   vector[J] x;
-  int<lower=1, upper=J> expt_id[N];
+  array[N] int<lower=1, upper=J> expt_id;
 }
 parameters {
   real mu_theta;
