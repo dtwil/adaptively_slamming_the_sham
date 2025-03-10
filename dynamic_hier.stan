@@ -2,8 +2,8 @@ data {
     int<lower=1> num_expts;
     vector[num_expts] avg_treated_response;
     vector[num_expts] avg_control_response;
-    vector[num_expts] treated_se;
-    vector[num_expts] control_se;
+    vector<lower=0>[num_expts] treated_se;
+    vector<lower=0>[num_expts] control_se;
     array[num_expts] int<lower=1, upper=num_expts> expt_id;
 }
 parameters {
@@ -25,6 +25,6 @@ model {
     eta_theta ~ normal(0, 1);
     eta_b ~ normal(0, 1);
 
-    avg_treated_response ~ normal(b[expt_id] + theta[expt_id], treated_se);
-    avg_control_response ~ normal(b[expt_id], control_se);
+    avg_treated_response ~ normal(b + theta, treated_se);
+    avg_control_response ~ normal(b, control_se);
 }
