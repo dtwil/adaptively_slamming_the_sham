@@ -14,7 +14,7 @@ CHICK_SIGMA_CONTROL = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
 
 
-def fake_expts_with_prop(
+def simulate_experiments(
     num_subjects_per_expt,
     prop_treatment,
     mu_b,
@@ -25,21 +25,24 @@ def fake_expts_with_prop(
     sigma_control,
 ):
     """
-    Generate synthetic data with a specified proportion of treated subjects.
+    Simulate a set of experiments according to the multilevel model:
 
-    Args:
-    num_subjects_per_expt: A list of integers, the number of subjects in each
-        experiment.
-    prop_treatment: A float, the proportion of subjects that are treated.
-    mu_b: A float, the true (mean) of the control group response.
-    mu_theta: A float, the true (mean) treatment effect.
-    sigma_b: A float, the standard deviation of b_j.
-    sigma_theta: A float, the standard deviation of theta_j.
-    sigma_treatment: A float, the standard deviation of the treated group
-        response.
-    sigma_control: A float, the standard deviation of the control group
-        response.
+    b_j ~ N(mu_b, sigma_b^2)
+    theta_j ~ N(mu_theta, sigma_theta^2)
+
+    y_{j0} ~ N(b_j, sigma_control^2 / n_{j0})
+    y_{j1} ~ N(b_j + theta_j, sigma_treatment^2 / n_{j1})
+
+    where j is the experiment index, n_{j0} is the number of control subjects
+    in experiment j, and n_{j1} is the number of treated subjects in experiment j.
+    Note that n_{j1} = prop_treatment[j] * num_subjects_per_expt[j].
+
+    Returns: a dictionary whose entries are the true parameters of the model,
+    the number of experiments, the average treated and control responses,
+    the standard errors of the treated and control responses, and the
+    experiment IDs.
     """
+
     assert len(num_subjects_per_expt) == len(prop_treatment)
     assert sigma_theta >= 0 and sigma_b >= 0
     assert sigma_treatment >= 0 and sigma_control >= 0
@@ -54,6 +57,8 @@ def fake_expts_with_prop(
     theta = np.random.normal(mu_theta, sigma_theta, num_expts)
     b = np.random.normal(mu_b, sigma_b, num_expts)
 
+    # need to return a dict because cmdstanpy expects a dict
+    # also need to keep true_params to evaluate MSE, type S error, etc
     return {
         "true_params": {
             "mu_b": mu_b,
@@ -126,16 +131,13 @@ def get_posterior_inferences(model, data, alpha=0.05):
 
 
 def get_summary(df):
-    prop_signif = np.mean(df["is_signif"])
-    mse = np.mean(df["error"] ** 2)
-    type_s_rate = (
+    statistics = {}
+    statistics["prop_signif"] = np.mean(df["is_signif"])
+    statistics["mse"] = np.mean(df["error"] ** 2)
+    statistics["type_s_rate"] = (
         len(df[df["is_signif"] & ~df["correct_sign"]]) / len(df) if len(df) > 0 else 0
     )
-    return {
-        "prop_signif": prop_signif,
-        "type_s_rate": type_s_rate,
-        "mse": mse,
-    }
+    return statistics
 
 
 def repeat_inferences(
@@ -157,7 +159,7 @@ def repeat_inferences(
     }
 
     for i in range(num_repetitions):
-        fake_data = fake_expts_with_prop(
+        fake_data = simulate_experiments(
             num_subjects_per_expt,
             prop_treatment,
             mu_b,
