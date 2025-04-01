@@ -83,7 +83,8 @@ def _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper):
     # an observation is significant if 0 is not in the interval
     significant = ~((conf_lower < 0) & (0 < conf_upper))
     correct_sign = np.sign(data_dict["true_params"]["mu_theta"]) == np.sign(estimate)
-    error = data_dict["true_params"]["theta"] - estimate
+    sample_error = data_dict["true_params"]["theta"] - estimate
+    pop_error = data_dict["true_params"]["mu_theta"] - estimate
 
     return pd.DataFrame(
         {
@@ -93,7 +94,8 @@ def _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper):
             "conf_upper": conf_upper,
             "is_signif": significant,
             "correct_sign": correct_sign,
-            "error": error,
+            "sample_error": sample_error,
+            "pop_error": pop_error,
         }
     )
 
@@ -176,13 +178,18 @@ def evaluate_estimates(estimates_df):
 
     Returns: A pandas DataFrame with the following columns:
         - prop_signif: The proportion of estimates that are significant
-        - mse: The mean squared error of the estimates
+        - sample_mse: The mean of (estimate[j] - theta[j])^2
+        - pop_mse: The mean of (estimate[j] - mu_theta)^2
         - type_s_rate: The type S error rate (the proportion of estimates that are significant but have the wrong sign)
 
         Note that this DataFrame has only one row.
     """
+    true_theta = estimates_df["estimate"] + estimates_df["sample_error"]
+
     prop_signif = np.mean(estimates_df["is_signif"])
-    mse = np.mean(estimates_df["error"] ** 2)
+    sample_mse = np.mean(estimates_df["sample_error"] ** 2)
+    pop_mse = np.mean(estimates_df["pop_error"] ** 2)
+    rank_corr = estimates_df["estimate"].corr(true_theta, method="spearman")
 
     is_signif = estimates_df["is_signif"]
     correct_sign = estimates_df["correct_sign"]
@@ -196,8 +203,10 @@ def evaluate_estimates(estimates_df):
     return pd.DataFrame(
         {
             "prop_signif": [prop_signif],
-            "mse": [mse],
+            "sample_mse": [sample_mse],
+            "pop_mse": [pop_mse],
             "type_s_rate": [type_s_rate],
+            "rank_corr": [rank_corr],
         }
     )
 
@@ -241,8 +250,9 @@ def repeat_inferences(
             evaluation["iteration"] = i + 1
             evaluations = pd.concat([evaluations, evaluation], ignore_index=True)
 
-        if show_progress and i % 10 == 0:
-            print(f"Completed repetition {i + 1} of {num_repetitions}")
+        # shows progress every 5% or so
+        if show_progress and (i + 1) % max(1, num_repetitions // 20) == 0:
+            print(f"Progress: {((i + 1) / num_repetitions) * 100:.2f}%")
 
     return evaluations
 
