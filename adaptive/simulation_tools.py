@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import os
 from scipy import stats
 
 
@@ -12,6 +13,23 @@ CHICK_SIGMA_B = 0.0015924804430524674
 CHICK_SIGMA_TREATMENT = (32**0.5) * 0.04
 CHICK_SIGMA_CONTROL = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
+
+
+def get_chick_data():
+    chicks = pd.read_table(
+        os.path.join("..", "nonadaptive", "chickens.dat"), sep="\\s+"
+    )
+    chicks["exposed_est"] -= 1
+    chicks["sham_est"] -= 1
+    chick_data = {
+        "num_expts": len(chicks),
+        "avg_treated_response": chicks["exposed_est"],
+        "avg_control_response": chicks["sham_est"],
+        "treated_se": chicks["exposed_se"],
+        "control_se": chicks["sham_se"],
+        "expt_id": list(range(1, len(chicks) + 1)),
+    }
+    return chick_data
 
 
 def simulate_experiments(
@@ -265,18 +283,3 @@ def posterior_summary(model, data):
         "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
         "sigma_b": np.std(np.mean(fit.b, axis=0)),
     }
-
-
-def get_chick_data():
-    chicks = pd.read_table("../nonadaptive/chickens.dat", sep="\\s+")
-    chicks["exposed_est"] -= 1
-    chicks["sham_est"] -= 1
-    chick_data = {
-        "num_expts": len(chicks),
-        "avg_treated_response": chicks["exposed_est"],
-        "avg_control_response": chicks["sham_est"],
-        "treated_se": chicks["exposed_se"],
-        "control_se": chicks["sham_se"],
-        "expt_id": list(range(1, len(chicks) + 1)),
-    }
-    return chick_data
