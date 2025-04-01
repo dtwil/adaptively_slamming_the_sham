@@ -170,14 +170,36 @@ def estimates_posterior(data_dict, model, alpha=0.05):
     return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
 
 
-def get_summary(df):
-    statistics = {}
-    statistics["prop_signif"] = np.mean(df["is_signif"])
-    statistics["mse"] = np.mean(df["error"] ** 2)
-    statistics["type_s_rate"] = (
-        len(df[df["is_signif"] & ~df["correct_sign"]]) / len(df) if len(df) > 0 else 0
+def evaluate_estimates(estimates_df):
+    """
+    estimates_df: A pandas DataFrame of the type returned by the above 'estimates' functions.
+
+    Returns: A pandas DataFrame with the following columns:
+        - prop_signif: The proportion of estimates that are significant
+        - mse: The mean squared error of the estimates
+        - type_s_rate: The type S error rate (the proportion of estimates that are significant but have the wrong sign)
+
+        Note that this DataFrame has only one row.
+    """
+    prop_signif = np.mean(estimates_df["is_signif"])
+    mse = np.mean(estimates_df["error"] ** 2)
+
+    is_signif = estimates_df["is_signif"]
+    correct_sign = estimates_df["correct_sign"]
+    is_type_s_error = is_signif & ~correct_sign
+    type_s_rate = (
+        len(estimates_df[is_type_s_error]) / len(estimates_df)
+        if len(estimates_df) > 0
+        else 0
     )
-    return statistics
+
+    return pd.DataFrame(
+        {
+            "prop_signif": [prop_signif],
+            "mse": [mse],
+            "type_s_rate": [type_s_rate],
+        }
+    )
 
 
 def repeat_inferences(
@@ -193,10 +215,7 @@ def repeat_inferences(
     sigma_control,
     show_progress=False,
 ):
-    summaries = {
-        method: {"prop_signif": [], "type_s_rate": [], "mse": []}
-        for method in ["exposed_only", "difference", "posterior"]
-    }
+    evaluations = pd.DataFrame()
 
     for i in range(num_repetitions):
         fake_data = simulate_experiments(
@@ -210,22 +229,22 @@ def repeat_inferences(
             sigma_control,
         )
 
-        exposed_only = estimates_exposed_only(fake_data)
-        difference = estimates_difference(fake_data)
-        posterior = estimates_posterior(fake_data, model)
+        estimator_dfs = {
+            "exposed_only": estimates_exposed_only(fake_data),
+            "difference": estimates_difference(fake_data),
+            "posterior": estimates_posterior(fake_data, model),
+        }
 
-        for method, df in zip(
-            ["exposed_only", "difference", "posterior"],
-            [exposed_only, difference, posterior],
-        ):
-            summary = get_summary(df)
-            for key in summary:
-                summaries[method][key].append(summary[key])
+        for estimator_name, estimates_df in estimator_dfs.items():
+            evaluation = evaluate_estimates(estimates_df)
+            evaluation["estimator"] = estimator_name
+            evaluation["iteration"] = i + 1
+            evaluations = pd.concat([evaluations, evaluation], ignore_index=True)
 
         if show_progress and i % 10 == 0:
-            print(f"Completed repetition {i} of {num_repetitions - 1}")
+            print(f"Completed repetition {i + 1} of {num_repetitions}")
 
-    return summaries
+    return evaluations
 
 
 def posterior_summary(model, data):
