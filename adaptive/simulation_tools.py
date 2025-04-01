@@ -79,11 +79,11 @@ def simulate_experiments(
     }
 
 
-def get_model_inferences(data, estimate, se, conf_lower, conf_upper):
+def _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper):
     # an observation is significant if 0 is not in the interval
     significant = ~((conf_lower < 0) & (0 < conf_upper))
-    correct_sign = np.sign(data["true_params"]["mu_theta"]) == np.sign(estimate)
-    error = data["true_params"]["theta"] - estimate
+    correct_sign = np.sign(data_dict["true_params"]["mu_theta"]) == np.sign(estimate)
+    error = data_dict["true_params"]["theta"] - estimate
 
     return pd.DataFrame(
         {
@@ -98,28 +98,68 @@ def get_model_inferences(data, estimate, se, conf_lower, conf_upper):
     )
 
 
-def get_exposed_only_inferences(data, alpha=0.05):
+def estimates_exposed_only(data_dict, alpha=0.05):
+    """
+    data_dict: A data dictionary (see the output of simulate_experiments)
+    alpha: The significance level for hypothesis testing
+
+    Returns: A pandas DataFrame with num_expt rows and the following columns:
+        - estimate: The estimated average response for the treated group
+        - se: The standard error of the estimate
+        - conf_lower: The lower bound of the confidence interval
+        - conf_upper: The upper bound of the confidence interval
+        - is_signif: A boolean indicating whether the estimate is significant
+        - correct_sign: A boolean indicating whether the estimate has the correct sign
+        - error: The error of the estimate compared to the true parameter value
+    """
     z_value = stats.norm.ppf(1 - alpha / 2)
-    estimate = data["avg_treated_response"]
-    se = data["treated_se"]
+    estimate = data_dict["avg_treated_response"]
+    se = data_dict["treated_se"]
     conf_lower = estimate - z_value * se
     conf_upper = estimate + z_value * se
 
-    return get_model_inferences(data, estimate, se, conf_lower, conf_upper)
+    return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
 
 
-def get_difference_inferences(data, alpha=0.05):
+def estimates_difference(data_dict, alpha=0.05):
+    """
+    data_dict: A data dictionary (see the output of simulate_experiments)
+    alpha: The significance level for hypothesis testing
+
+    Returns: A pandas DataFrame with num_expt rows and the following columns:
+        - estimate: The estimated average response for the treated group
+        - se: The standard error of the estimate
+        - conf_lower: The lower bound of the confidence interval
+        - conf_upper: The upper bound of the confidence interval
+        - is_signif: A boolean indicating whether the estimate is significant
+        - correct_sign: A boolean indicating whether the estimate has the correct sign
+        - error: The error of the estimate compared to the true parameter value
+    """
     z_value = stats.norm.ppf(1 - alpha / 2)
-    estimate = data["avg_treated_response"] - data["avg_control_response"]
-    se = np.sqrt(data["treated_se"] ** 2 + data["control_se"] ** 2)
+    estimate = data_dict["avg_treated_response"] - data_dict["avg_control_response"]
+    se = np.sqrt(data_dict["treated_se"] ** 2 + data_dict["control_se"] ** 2)
     conf_lower = estimate - z_value * se
     conf_upper = estimate + z_value * se
 
-    return get_model_inferences(data, estimate, se, conf_lower, conf_upper)
+    return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
 
 
-def get_posterior_inferences(model, data, alpha=0.05):
-    fit = model.sample(data=data, adapt_delta=0.9, show_progress=False)
+def estimates_posterior(data_dict, model, alpha=0.05):
+    """
+    data_dict: A data dictionary (see the output of simulate_experiments)
+    model: A cmdstanpy model object (not fitted)
+    alpha: The significance level for hypothesis testing
+
+    Returns: A pandas DataFrame with num_expt rows and the following columns:
+        - estimate: The estimated average response for the treated group
+        - se: The standard error of the estimate
+        - conf_lower: The lower bound of the confidence interval
+        - conf_upper: The upper bound of the confidence interval
+        - is_signif: A boolean indicating whether the estimate is significant
+        - correct_sign: A boolean indicating whether the estimate has the correct sign
+        - error: The error of the estimate compared to the true parameter value
+    """
+    fit = model.sample(data=data_dict, adapt_delta=0.9, show_progress=False)
     estimate = np.mean(fit.stan_variable("theta"), axis=0)
     se = np.std(fit.stan_variable("theta"), axis=0)
 
@@ -127,7 +167,7 @@ def get_posterior_inferences(model, data, alpha=0.05):
     conf_lower = np.quantile(thetas, alpha / 2, axis=0)
     conf_upper = np.quantile(thetas, 1 - alpha / 2, axis=0)
 
-    return get_model_inferences(data, estimate, se, conf_lower, conf_upper)
+    return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
 
 
 def get_summary(df):
@@ -170,9 +210,9 @@ def repeat_inferences(
             sigma_control,
         )
 
-        exposed_only = get_exposed_only_inferences(fake_data)
-        difference = get_difference_inferences(fake_data)
-        posterior = get_posterior_inferences(model, fake_data)
+        exposed_only = estimates_exposed_only(fake_data)
+        difference = estimates_difference(fake_data)
+        posterior = estimates_posterior(fake_data, model)
 
         for method, df in zip(
             ["exposed_only", "difference", "posterior"],
@@ -199,7 +239,7 @@ def posterior_summary(model, data):
 
 
 def get_chick_data():
-    chicks = pd.read_table("chickens.dat", sep="\\s+")
+    chicks = pd.read_table("../nonadaptive/chickens.dat", sep="\\s+")
     chicks["exposed_est"] -= 1
     chicks["sham_est"] -= 1
     chick_data = {
