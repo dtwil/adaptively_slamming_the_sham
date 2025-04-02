@@ -1,6 +1,9 @@
+import os
+from itertools import product
+from collections.abc import Iterable
+
 import pandas as pd
 import numpy as np
-import os, time
 from scipy import stats
 
 
@@ -30,6 +33,16 @@ def get_chick_data():
         "expt_id": list(range(1, len(chicks) + 1)),
     }
     return chick_data
+
+
+def posterior_summary(model, data):
+    fit = model.sample(data=data, adapt_delta=0.9, show_progress=False)
+    return {
+        "mu_theta": np.mean(fit.theta),
+        "mu_b": np.mean(fit.b),
+        "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
+        "sigma_b": np.std(np.mean(fit.b, axis=0)),
+    }
 
 
 def simulate_experiments(
@@ -229,32 +242,11 @@ def evaluate_estimates(estimates_df):
     )
 
 
-def repeat_inferences(
-    model,
-    num_repetitions,
-    num_subjects_per_expt,
-    prop_treatment,
-    mu_b,
-    mu_theta,
-    sigma_b,
-    sigma_theta,
-    sigma_treatment,
-    sigma_control,
-    show_progress=False,
-):
+def repeat_inferences(model, reps, params, show_progress=False):
     evaluations = pd.DataFrame()
 
-    for i in range(num_repetitions):
-        fake_data = simulate_experiments(
-            num_subjects_per_expt,
-            prop_treatment,
-            mu_b,
-            mu_theta,
-            sigma_b,
-            sigma_theta,
-            sigma_treatment,
-            sigma_control,
-        )
+    for i in range(reps):
+        fake_data = simulate_experiments(**params)
 
         estimator_dfs = {
             "exposed_only": estimates_exposed_only(fake_data),
@@ -264,97 +256,63 @@ def repeat_inferences(
 
         for estimator_name, estimates_df in estimator_dfs.items():
             evaluation = evaluate_estimates(estimates_df)
+            evaluation["params"] = [params]  # Ensure the column is of type object
             evaluation["estimator"] = estimator_name
             evaluation["iteration"] = i + 1
             evaluations = pd.concat([evaluations, evaluation], ignore_index=True)
 
         # shows progress every 5% or so
-        if show_progress and (i + 1) % max(1, num_repetitions // 20) == 0:
-            print(f"Progress: {((i + 1) / num_repetitions) * 100:.2f}%")
+        if show_progress and (i + 1) % max(1, reps // 20) == 0:
+            print(f"Progress: {((i + 1) / reps) * 100:.2f}%")
 
     return evaluations
 
 
-def posterior_summary(model, data):
-    fit = model.sample(data=data, adapt_delta=0.9, show_progress=False)
-    return {
-        "mu_theta": np.mean(fit.theta),
-        "mu_b": np.mean(fit.b),
-        "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
-        "sigma_b": np.std(np.mean(fit.b, axis=0)),
-    }
-
-
-def evaluate_varying_sigma_b(
-    model,
-    num_repetitions,
-    num_subjects_per_expt,
-    prop_treatment,
-    mu_b,
-    mu_theta,
-    sigma_b_grid,
-    sigma_theta,
-    sigma_treatment,
-    sigma_control,
-    show_progress=False,
-):
-    begin_time = time.time()
+def evaluate_params(model, reps, params, show_progress=False):
+    # every value in params must be a list
+    assert all(isinstance(value, Iterable) for value in params.values())
 
     evaluation = pd.DataFrame()
 
-    for i, sigma_b in enumerate(sigma_b_grid):
+    # Generate all combinations of parameter values
+    param_keys = list(params.keys())
+    param_combinations = list(product(*params.values()))
+
+    for i, param_values in enumerate(param_combinations):
         if show_progress:
-            print(f"Sigma b: {sigma_b}. Run: {i + 1}/{len(sigma_b_grid)}")
+            if (i + 1) % max(1, len(param_combinations) // 20) == 0:
+                print(f"Progress: {((i + 1) / len(param_combinations)) * 100:.2f}%")
 
-        sigma_b_eval = repeat_inferences(
-            model=model,
-            num_repetitions=num_repetitions,
-            num_subjects_per_expt=num_subjects_per_expt,
-            prop_treatment=prop_treatment,
-            mu_b=mu_b,
-            mu_theta=mu_theta,
-            sigma_b=sigma_b,
-            sigma_theta=sigma_theta,
-            sigma_treatment=sigma_treatment,
-            sigma_control=sigma_control,
-        )
-        sigma_b_eval["sigma_b"] = sigma_b
-
-        # add the sigma_b value to the evaluation
-        evaluation = pd.concat([evaluation, sigma_b_eval], ignore_index=True)
-
-    if show_progress:
-        print(f"Took {time.time() - begin_time:.2f} seconds.")
+        # Create a dictionary for the current combination of parameters
+        current_params = dict(zip(param_keys, param_values))
+        eval_current_params = repeat_inferences(model, reps, current_params)
+        evaluation = pd.concat([evaluation, eval_current_params], ignore_index=True)
 
     return evaluation
 
 
-def evaluate_varying_sigma_b_means(
-    model,
-    num_repetitions,
-    num_subjects_per_expt,
-    prop_treatment,
-    mu_b,
-    mu_theta,
-    sigma_b_grid,
-    sigma_theta,
-    sigma_treatment,
-    sigma_control,
-    show_progress=False,
-):
-    evaluation = evaluate_varying_sigma_b(
-        model=model,
-        num_repetitions=num_repetitions,
-        num_subjects_per_expt=num_subjects_per_expt,
-        prop_treatment=prop_treatment,
-        mu_b=mu_b,
-        mu_theta=mu_theta,
-        sigma_b_grid=sigma_b_grid,
-        sigma_theta=sigma_theta,
-        sigma_treatment=sigma_treatment,
-        sigma_control=sigma_control,
-        show_progress=show_progress,
-    )
-    evaluation = evaluation.drop(columns=["iteration"])
-    means = evaluation.groupby(["sigma_b", "estimator"]).mean().reset_index()
-    return means
+def evaluate_params_means(model, reps, params, show_progress=False):
+    params_with_mult_vals = [p for p in params if len(params[p]) > 1]
+
+    eval = evaluate_params(model, reps, params, show_progress)
+    eval = eval.drop(columns=["iteration"])
+
+    for variable in params_with_mult_vals:
+        eval[variable] = eval.apply(lambda x: x["params"][variable], axis=1)
+
+    # need to convert the prop_treatment column to a tuple for grouping
+    if "prop_treatment" in params_with_mult_vals:
+        eval["prop_treatment"] = eval.apply(
+            lambda x: tuple(x["params"]["prop_treatment"]), axis=1
+        )
+
+    eval.drop(columns=["params"], inplace=True)
+    grouped = eval.groupby(["estimator"] + params_with_mult_vals).mean().reset_index()
+
+    # convert prop_treatment back to a numpy array
+    if "prop_treatment" in params_with_mult_vals:
+        grouped["prop_treatment"] = grouped.apply(
+            lambda x: np.array(x["prop_treatment"]), axis=1
+        )
+
+    return grouped
