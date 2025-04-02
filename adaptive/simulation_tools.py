@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import os
+import os, time
 from scipy import stats
 
 
@@ -283,3 +283,78 @@ def posterior_summary(model, data):
         "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
         "sigma_b": np.std(np.mean(fit.b, axis=0)),
     }
+
+
+def evaluate_varying_sigma_b(
+    model,
+    num_repetitions,
+    num_subjects_per_expt,
+    prop_treatment,
+    mu_b,
+    mu_theta,
+    sigma_b_grid,
+    sigma_theta,
+    sigma_treatment,
+    sigma_control,
+    show_progress=False,
+):
+    begin_time = time.time()
+
+    evaluation = pd.DataFrame()
+
+    for i, sigma_b in enumerate(sigma_b_grid):
+        if show_progress:
+            print(f"Sigma b: {sigma_b}. Run: {i + 1}/{len(sigma_b_grid)}")
+
+        sigma_b_eval = repeat_inferences(
+            model=model,
+            num_repetitions=num_repetitions,
+            num_subjects_per_expt=num_subjects_per_expt,
+            prop_treatment=prop_treatment,
+            mu_b=mu_b,
+            mu_theta=mu_theta,
+            sigma_b=sigma_b,
+            sigma_theta=sigma_theta,
+            sigma_treatment=sigma_treatment,
+            sigma_control=sigma_control,
+        )
+        sigma_b_eval["sigma_b"] = sigma_b
+
+        # add the sigma_b value to the evaluation
+        evaluation = pd.concat([evaluation, sigma_b_eval], ignore_index=True)
+
+    if show_progress:
+        print(f"Took {time.time() - begin_time:.2f} seconds.")
+
+    return evaluation
+
+
+def evaluate_varying_sigma_b_means(
+    model,
+    num_repetitions,
+    num_subjects_per_expt,
+    prop_treatment,
+    mu_b,
+    mu_theta,
+    sigma_b_grid,
+    sigma_theta,
+    sigma_treatment,
+    sigma_control,
+    show_progress=False,
+):
+    evaluation = evaluate_varying_sigma_b(
+        model=model,
+        num_repetitions=num_repetitions,
+        num_subjects_per_expt=num_subjects_per_expt,
+        prop_treatment=prop_treatment,
+        mu_b=mu_b,
+        mu_theta=mu_theta,
+        sigma_b_grid=sigma_b_grid,
+        sigma_theta=sigma_theta,
+        sigma_treatment=sigma_treatment,
+        sigma_control=sigma_control,
+        show_progress=show_progress,
+    )
+    evaluation = evaluation.drop(columns=["iteration"])
+    means = evaluation.groupby(["sigma_b", "estimator"]).mean().reset_index()
+    return means
