@@ -20,6 +20,12 @@ CHICK_SIGMA_CONTROL = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
 
 
+def expt_df_to_dict(expt_df):
+    to_dict = expt_df.to_dict(orient="list")
+    to_dict["num_expts"] = len(expt_df)
+    return to_dict
+
+
 def get_chick_data(chick_data_path):
     chicks = pd.read_table(chick_data_path, sep="\\s+")
     chicks["exposed_est"] -= 1
@@ -35,8 +41,8 @@ def get_chick_data(chick_data_path):
     return chick_data
 
 
-def posterior_summary(model, data):
-    fit = model.sample(data=data, show_progress=False)
+def posterior_summary(model, df):
+    fit = model.sample(data=expt_df_to_dict(df), show_progess=False)
     return {
         "mu_theta": np.mean(fit.theta),
         "mu_b": np.mean(fit.b),
@@ -87,42 +93,40 @@ def simulate_experiments(params):
     theta = np.random.normal(mu_theta, sigma_theta, num_expts)
     b = np.random.normal(mu_b, sigma_b, num_expts)
 
-    # need to return a dict because cmdstanpy expects a dict
-    # also need to keep true_params to evaluate MSE, type S error, etc
-    return {
-        "true_params": {
-            "mu_b": mu_b,
-            "mu_theta": mu_theta,
-            "sigma_b": sigma_b,
-            "sigma_theta": sigma_theta,
-            "sigma_treatment": sigma_treatment,
-            "sigma_control": sigma_control,
-            "theta": theta,
-            "b": b,
-        },
-        "num_expts": len(num_subjects_per_expt),
-        "avg_treated_response": np.random.normal(theta + b, sigma_y1),
-        "avg_control_response": np.random.normal(b, sigma_y0),
-        "treated_se": sigma_y1,
-        "control_se": sigma_y0,
-        "expt_id": list(range(1, num_expts + 1)),
+    expt_df = pd.DataFrame(
+        {
+            "avg_treated_response": np.random.normal(theta + b, sigma_y1),
+            "avg_control_response": np.random.normal(b, sigma_y0),
+            "treated_se": sigma_y1,
+            "control_se": sigma_y0,
+            "expt_id": list(range(1, num_expts + 1)),
+        }
+    )
+    expt_df.attrs = {
+        "num_expts": num_expts,
+        "num_subjects_per_expt": num_subjects_per_expt,
+        "prop_treatment": prop_treatment,
+        "mu_b": mu_b,
+        "mu_theta": mu_theta,
+        "sigma_b": sigma_b,
+        "sigma_theta": sigma_theta,
+        "sigma_treatment": sigma_treatment,
+        "sigma_control": sigma_control,
+        "theta": theta,
+        "b": b,
     }
 
+    return expt_df
 
-def _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper):
+
+def _oracle_metrics(expt_df, estimate):
     # an observation is significant if 0 is not in the interval
-    significant = ~((conf_lower < 0) & (0 < conf_upper))
-    correct_sign = np.sign(data_dict["true_params"]["mu_theta"]) == np.sign(estimate)
-    sample_error = data_dict["true_params"]["theta"] - estimate
-    pop_error = data_dict["true_params"]["mu_theta"] - estimate
+    correct_sign = np.sign(expt_df.attrs["mu_theta"]) == np.sign(estimate)
+    sample_error = expt_df.attrs["theta"] - estimate
+    pop_error = expt_df.attrs["mu_theta"] - estimate
 
     return pd.DataFrame(
         {
-            "estimate": estimate,
-            "se": se,
-            "conf_lower": conf_lower,
-            "conf_upper": conf_upper,
-            "is_signif": significant,
             "correct_sign": correct_sign,
             "sample_error": sample_error,
             "pop_error": pop_error,
@@ -130,9 +134,10 @@ def _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper):
     )
 
 
-def estimates_exposed_only(data_dict, alpha=0.05):
+def estimates_exposed_only(expt_df, alpha=0.05, oracle=False):
     """
-    data_dict: A data dictionary (see the output of simulate_experiments)
+    expt_df: A pandas DataFrame with experiment data
+            (see the output of simulate_experiments)
     alpha: The significance level for hypothesis testing
 
     Returns: A pandas DataFrame with num_expt rows and the following columns:
@@ -145,17 +150,34 @@ def estimates_exposed_only(data_dict, alpha=0.05):
         - error: The error of the estimate compared to the true parameter value
     """
     z_value = stats.norm.ppf(1 - alpha / 2)
-    estimate = data_dict["avg_treated_response"]
-    se = data_dict["treated_se"]
+    estimate = expt_df["avg_treated_response"]
+    se = expt_df["treated_se"]
     conf_lower = estimate - z_value * se
     conf_upper = estimate + z_value * se
+    significant = ~((conf_lower < 0) & (0 < conf_upper))
 
-    return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
+    eval_df = pd.DataFrame(
+        {
+            "estimate": estimate,
+            "se": se,
+            "conf_lower": conf_lower,
+            "conf_upper": conf_upper,
+            "is_signif": significant,
+        }
+    )
+
+    if not oracle:
+        return eval_df
+
+    oracle_evaluation = _oracle_metrics(expt_df, estimate)
+    eval_df = pd.concat([eval_df, oracle_evaluation], axis=1)
+    return eval_df
 
 
-def estimates_difference(data_dict, alpha=0.05):
+def estimates_difference(expt_df, alpha=0.05, oracle=False):
     """
-    data_dict: A data dictionary (see the output of simulate_experiments)
+    expt_df: A pandas DataFrame with experiment data
+            (see the output of simulate_experiments)
     alpha: The significance level for hypothesis testing
 
     Returns: A pandas DataFrame with num_expt rows and the following columns:
@@ -168,17 +190,34 @@ def estimates_difference(data_dict, alpha=0.05):
         - error: The error of the estimate compared to the true parameter value
     """
     z_value = stats.norm.ppf(1 - alpha / 2)
-    estimate = data_dict["avg_treated_response"] - data_dict["avg_control_response"]
-    se = np.sqrt(data_dict["treated_se"] ** 2 + data_dict["control_se"] ** 2)
+    estimate = expt_df["avg_treated_response"] - expt_df["avg_control_response"]
+    se = np.sqrt(expt_df["treated_se"] ** 2 + expt_df["control_se"] ** 2)
     conf_lower = estimate - z_value * se
     conf_upper = estimate + z_value * se
+    significant = ~((conf_lower < 0) & (0 < conf_upper))
 
-    return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
+    eval_df = pd.DataFrame(
+        {
+            "estimate": estimate,
+            "se": se,
+            "conf_lower": conf_lower,
+            "conf_upper": conf_upper,
+            "is_signif": significant,
+        }
+    )
+
+    if not oracle:
+        return eval_df
+
+    oracle_evaluation = _oracle_metrics(expt_df, estimate)
+    eval_df = pd.concat([eval_df, oracle_evaluation], axis=1)
+    return eval_df
 
 
-def estimates_posterior(data_dict, model, alpha=0.05):
+def estimates_posterior(expt_df, model, alpha=0.05, oracle=False):
     """
-    data_dict: A data dictionary (see the output of simulate_experiments)
+    expt_df: A pandas DataFrame with experiment data
+            (see the output of simulate_experiments)
     model: A cmdstanpy model object (not fitted)
     alpha: The significance level for hypothesis testing
 
@@ -191,15 +230,31 @@ def estimates_posterior(data_dict, model, alpha=0.05):
         - correct_sign: A boolean indicating whether the estimate has the correct sign
         - error: The error of the estimate compared to the true parameter value
     """
-    fit = model.sample(data=data_dict, adapt_delta=0.9, show_progress=False)
+    fit = model.sample(data=expt_df_to_dict(expt_df), show_progress=False)
     estimate = np.mean(fit.stan_variable("theta"), axis=0)
     se = np.std(fit.stan_variable("theta"), axis=0)
 
     thetas = fit.stan_variable("theta")
     conf_lower = np.quantile(thetas, alpha / 2, axis=0)
     conf_upper = np.quantile(thetas, 1 - alpha / 2, axis=0)
+    significant = ~((conf_lower < 0) & (0 < conf_upper))
 
-    return _estimates_helper(data_dict, estimate, se, conf_lower, conf_upper)
+    eval_df = pd.DataFrame(
+        {
+            "estimate": estimate,
+            "se": se,
+            "conf_lower": conf_lower,
+            "conf_upper": conf_upper,
+            "is_signif": significant,
+        }
+    )
+
+    if not oracle:
+        return eval_df
+
+    oracle_evaluation = _oracle_metrics(expt_df, estimate)
+    eval_df = pd.concat([eval_df, oracle_evaluation], axis=1)
+    return eval_df
 
 
 def evaluate_estimates(estimates_df):
@@ -241,16 +296,17 @@ def evaluate_estimates(estimates_df):
     )
 
 
-def repeat_inferences(model, reps, params, show_progress=False):
+def repeat_inferences(model, reps, params):
     evaluations = pd.DataFrame()
 
     for i in tqdm(range(reps), desc="Repetition", leave=False):
-        fake_data = simulate_experiments(params)
+        expt_df = simulate_experiments(params)
+        params = expt_df.attrs
 
         estimator_dfs = {
-            "exposed_only": estimates_exposed_only(fake_data),
-            "difference": estimates_difference(fake_data),
-            "posterior": estimates_posterior(fake_data, model),
+            "exposed_only": estimates_exposed_only(expt_df, oracle=True),
+            "difference": estimates_difference(expt_df, oracle=True),
+            "posterior": estimates_posterior(expt_df, model, oracle=True),
         }
 
         for estimator_name, estimates_df in estimator_dfs.items():
