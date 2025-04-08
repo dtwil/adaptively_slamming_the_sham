@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 
+from tqdm import tqdm
+
 
 CHICK_NUM_EXPTS = 38
 CHICK_NUM_SUBJECTS_PER_EXPT = 64
@@ -245,7 +247,7 @@ def evaluate_estimates(estimates_df):
 def repeat_inferences(model, reps, params, show_progress=False):
     evaluations = pd.DataFrame()
 
-    for i in range(reps):
+    for i in tqdm(range(reps)):
         fake_data = simulate_experiments(**params)
 
         estimator_dfs = {
@@ -261,10 +263,6 @@ def repeat_inferences(model, reps, params, show_progress=False):
             evaluation["iteration"] = i + 1
             evaluations = pd.concat([evaluations, evaluation], ignore_index=True)
 
-        # shows progress every 5% or so
-        if show_progress and (i + 1) % max(1, reps // 20) == 0:
-            print(f"Progress: {((i + 1) / reps) * 100:.2f}%")
-
     return evaluations
 
 
@@ -278,10 +276,7 @@ def evaluate_params(model, reps, params, show_progress=False):
     param_keys = list(params.keys())
     param_combinations = list(product(*params.values()))
 
-    for i, param_values in enumerate(param_combinations):
-        if show_progress:
-            if (i + 1) % max(1, len(param_combinations) // 20) == 0:
-                print(f"Progress: {((i + 1) / len(param_combinations)) * 100:.2f}%")
+    for i, param_values in tqdm(enumerate(param_combinations)):
 
         # Create a dictionary for the current combination of parameters
         current_params = dict(zip(param_keys, param_values))
