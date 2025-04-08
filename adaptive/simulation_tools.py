@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 
-from tqdm import tqdm
+from tqdm.autonotebook import tqdm
 
 
 CHICK_NUM_EXPTS = 38
@@ -22,7 +22,8 @@ CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
 
 def get_chick_data():
     chicks = pd.read_table(
-        os.path.join("..", "nonadaptive", "chickens.dat"), sep="\\s+"
+        "/Users/dantwili/Research/adaptively_slamming_the_sham/nonadaptive/chickens.dat",
+        sep="\\s+",
     )
     chicks["exposed_est"] -= 1
     chicks["sham_est"] -= 1
@@ -38,13 +39,20 @@ def get_chick_data():
 
 
 def posterior_summary(model, data):
-    fit = model.sample(data=data, adapt_delta=0.9, show_progress=False)
+    fit = model.sample(data=data, show_progress=False)
     return {
         "mu_theta": np.mean(fit.theta),
         "mu_b": np.mean(fit.b),
         "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
         "sigma_b": np.std(np.mean(fit.b, axis=0)),
     }
+
+
+def simulate_optimize_ratio(params):
+    """
+    Simulate a set of experiments according to the multilevel model
+    as described im `simulate_experiments`. This function ad
+    """
 
 
 def simulate_experiments(params):
@@ -246,7 +254,7 @@ def evaluate_estimates(estimates_df):
 def repeat_inferences(model, reps, params, show_progress=False):
     evaluations = pd.DataFrame()
 
-    for i in tqdm(range(reps)):
+    for i in tqdm(range(reps), desc="Repetition", leave=False):
         fake_data = simulate_experiments(params)
 
         estimator_dfs = {
@@ -275,7 +283,9 @@ def evaluate_params(model, reps, params, show_progress=False):
     param_keys = list(params.keys())
     param_combinations = list(product(*params.values()))
 
-    for i, param_values in tqdm(enumerate(param_combinations)):
+    for i, param_values in tqdm(
+        enumerate(param_combinations), desc="Parameter Set", leave=False
+    ):
 
         # Create a dictionary for the current combination of parameters
         current_params = dict(zip(param_keys, param_values))
