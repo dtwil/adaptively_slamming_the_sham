@@ -1,4 +1,3 @@
-import os
 from itertools import product
 from collections.abc import Iterable
 
@@ -119,25 +118,11 @@ def simulate_experiments(params):
     return expt_df
 
 
-def _oracle_metrics(expt_df, estimate):
-    # an observation is significant if 0 is not in the interval
-    correct_sign = np.sign(expt_df.attrs["mu_theta"]) == np.sign(estimate)
-    sample_error = expt_df.attrs["theta"] - estimate
-    pop_error = expt_df.attrs["mu_theta"] - estimate
-
-    return pd.DataFrame(
-        {
-            "correct_sign": correct_sign,
-            "sample_error": sample_error,
-            "pop_error": pop_error,
-        }
-    )
-
-
-def estimates_exposed_only(expt_df, alpha=0.05, oracle=False):
+def _get_estimates(expt_df, estimator_fn, alpha=0.05, oracle=False, **kwargs):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
+    estimator_fn: The function to use for estimating the parameters
     alpha: The significance level for hypothesis testing
 
     Returns: A pandas DataFrame with num_expt rows and the following columns:
@@ -149,11 +134,11 @@ def estimates_exposed_only(expt_df, alpha=0.05, oracle=False):
         - correct_sign: A boolean indicating whether the estimate has the correct sign
         - error: The error of the estimate compared to the true parameter value
     """
-    z_value = stats.norm.ppf(1 - alpha / 2)
-    estimate = expt_df["avg_treated_response"]
-    se = expt_df["treated_se"]
-    conf_lower = estimate - z_value * se
-    conf_upper = estimate + z_value * se
+    stats = estimator_fn(expt_df, alpha=alpha, **kwargs)
+    estimate = stats["estimate"]
+    se = stats["se"]
+    conf_lower = stats["conf_lower"]
+    conf_upper = stats["conf_upper"]
     significant = ~((conf_lower < 0) & (0 < conf_upper))
 
     eval_df = pd.DataFrame(
@@ -169,12 +154,15 @@ def estimates_exposed_only(expt_df, alpha=0.05, oracle=False):
     if not oracle:
         return eval_df
 
-    oracle_evaluation = _oracle_metrics(expt_df, estimate)
-    eval_df = pd.concat([eval_df, oracle_evaluation], axis=1)
+    # Add oracle metrics (only knowable in simulations)
+    eval_df["correct_sign"] = np.sign(expt_df.attrs["mu_theta"]) == np.sign(estimate)
+    eval_df["sample_error"] = expt_df.attrs["theta"] - estimate
+    eval_df["pop_error"] = expt_df.attrs["mu_theta"] - estimate
+
     return eval_df
 
 
-def estimates_difference(expt_df, alpha=0.05, oracle=False):
+def get_exposed_only_estimates(expt_df, alpha=0.05, oracle=False):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
@@ -189,32 +177,58 @@ def estimates_difference(expt_df, alpha=0.05, oracle=False):
         - correct_sign: A boolean indicating whether the estimate has the correct sign
         - error: The error of the estimate compared to the true parameter value
     """
-    z_value = stats.norm.ppf(1 - alpha / 2)
-    estimate = expt_df["avg_treated_response"] - expt_df["avg_control_response"]
-    se = np.sqrt(expt_df["treated_se"] ** 2 + expt_df["control_se"] ** 2)
-    conf_lower = estimate - z_value * se
-    conf_upper = estimate + z_value * se
-    significant = ~((conf_lower < 0) & (0 < conf_upper))
 
-    eval_df = pd.DataFrame(
-        {
+    def exposed_only_fn(expt_df, alpha=0.05):
+        estimate = expt_df["avg_treated_response"]
+        se = expt_df["treated_se"]
+        z_value = stats.norm.ppf(1 - alpha / 2)
+        conf_lower = estimate - z_value * se
+        conf_upper = estimate + z_value * se
+
+        return {
             "estimate": estimate,
             "se": se,
             "conf_lower": conf_lower,
             "conf_upper": conf_upper,
-            "is_signif": significant,
         }
-    )
 
-    if not oracle:
-        return eval_df
-
-    oracle_evaluation = _oracle_metrics(expt_df, estimate)
-    eval_df = pd.concat([eval_df, oracle_evaluation], axis=1)
-    return eval_df
+    return _get_estimates(expt_df, exposed_only_fn, alpha=alpha, oracle=oracle)
 
 
-def estimates_posterior(expt_df, model, alpha=0.05, oracle=False):
+def get_difference_estimates(expt_df, alpha=0.05, oracle=False):
+    """
+    expt_df: A pandas DataFrame with experiment data
+            (see the output of simulate_experiments)
+    alpha: The significance level for hypothesis testing
+
+    Returns: A pandas DataFrame with num_expt rows and the following columns:
+        - estimate: The estimated average response for the treated group
+        - se: The standard error of the estimate
+        - conf_lower: The lower bound of the confidence interval
+        - conf_upper: The upper bound of the confidence interval
+        - is_signif: A boolean indicating whether the estimate is significant
+        - correct_sign: A boolean indicating whether the estimate has the correct sign
+        - error: The error of the estimate compared to the true parameter value
+    """
+
+    def difference_fn(expt_df, alpha=0.05):
+        estimate = expt_df["avg_treated_response"] - expt_df["avg_control_response"]
+        se = np.sqrt(expt_df["treated_se"] ** 2 + expt_df["control_se"] ** 2)
+        z_value = stats.norm.ppf(1 - alpha / 2)
+        conf_lower = estimate - z_value * se
+        conf_upper = estimate + z_value * se
+
+        return {
+            "estimate": estimate,
+            "se": se,
+            "conf_lower": conf_lower,
+            "conf_upper": conf_upper,
+        }
+
+    return _get_estimates(expt_df, difference_fn, alpha=alpha, oracle=oracle)
+
+
+def get_bayes_estimates(expt_df, model, alpha=0.05, oracle=False):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
@@ -230,31 +244,24 @@ def estimates_posterior(expt_df, model, alpha=0.05, oracle=False):
         - correct_sign: A boolean indicating whether the estimate has the correct sign
         - error: The error of the estimate compared to the true parameter value
     """
-    fit = model.sample(data=expt_df_to_dict(expt_df), show_progress=False)
-    estimate = np.mean(fit.stan_variable("theta"), axis=0)
-    se = np.std(fit.stan_variable("theta"), axis=0)
 
-    thetas = fit.stan_variable("theta")
-    conf_lower = np.quantile(thetas, alpha / 2, axis=0)
-    conf_upper = np.quantile(thetas, 1 - alpha / 2, axis=0)
-    significant = ~((conf_lower < 0) & (0 < conf_upper))
+    def bayes_fn(expt_df, alpha=0.05, model=model):
+        fit = model.sample(data=expt_df_to_dict(expt_df), show_progress=False)
+        estimate = np.mean(fit.stan_variable("theta"), axis=0)
+        se = np.std(fit.stan_variable("theta"), axis=0)
 
-    eval_df = pd.DataFrame(
-        {
+        thetas = fit.stan_variable("theta")
+        conf_lower = np.quantile(thetas, alpha / 2, axis=0)
+        conf_upper = np.quantile(thetas, 1 - alpha / 2, axis=0)
+
+        return {
             "estimate": estimate,
             "se": se,
             "conf_lower": conf_lower,
             "conf_upper": conf_upper,
-            "is_signif": significant,
         }
-    )
 
-    if not oracle:
-        return eval_df
-
-    oracle_evaluation = _oracle_metrics(expt_df, estimate)
-    eval_df = pd.concat([eval_df, oracle_evaluation], axis=1)
-    return eval_df
+    return _get_estimates(expt_df, bayes_fn, alpha=alpha, oracle=oracle, model=model)
 
 
 def evaluate_estimates(estimates_df):
@@ -304,9 +311,9 @@ def repeat_inferences(model, reps, params):
         params = expt_df.attrs
 
         estimator_dfs = {
-            "exposed_only": estimates_exposed_only(expt_df, oracle=True),
-            "difference": estimates_difference(expt_df, oracle=True),
-            "posterior": estimates_posterior(expt_df, model, oracle=True),
+            "exposed_only": get_exposed_only_estimates(expt_df, oracle=True),
+            "difference": get_difference_estimates(expt_df, oracle=True),
+            "bayes": get_bayes_estimates(expt_df, oracle=True, model=model),
         }
 
         for estimator_name, estimates_df in estimator_dfs.items():
@@ -331,7 +338,7 @@ def evaluate_params(model, reps, params):
 
     for i, param_values in tqdm(
         enumerate(param_combinations),
-        desc="Parameter Set",
+        desc="Parameter Combination",
         leave=False,
         total=len(param_combinations),
     ):
