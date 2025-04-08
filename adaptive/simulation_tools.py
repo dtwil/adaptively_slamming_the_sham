@@ -47,16 +47,7 @@ def posterior_summary(model, data):
     }
 
 
-def simulate_experiments(
-    num_subjects_per_expt,
-    prop_treatment,
-    mu_b,
-    mu_theta,
-    sigma_b,
-    sigma_theta,
-    sigma_treatment,
-    sigma_control,
-):
+def simulate_experiments(params):
     """
     Simulate a set of experiments according to the multilevel model:
 
@@ -75,6 +66,14 @@ def simulate_experiments(
     the standard errors of the treated and control responses, and the
     experiment IDs.
     """
+    num_subjects_per_expt = params["num_subjects_per_expt"]
+    prop_treatment = params["prop_treatment"]
+    mu_b = params["mu_b"]
+    mu_theta = params["mu_theta"]
+    sigma_b = params["sigma_b"]
+    sigma_theta = params["sigma_theta"]
+    sigma_treatment = params["sigma_treatment"]
+    sigma_control = params["sigma_control"]
 
     assert len(num_subjects_per_expt) == len(prop_treatment)
     assert sigma_theta >= 0 and sigma_b >= 0
