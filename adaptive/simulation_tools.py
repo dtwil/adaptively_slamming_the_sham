@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 
-from tqdm.autonotebook import tqdm
+from tqdm.auto import tqdm
 
 
 CHICK_NUM_EXPTS = 38
@@ -20,11 +20,8 @@ CHICK_SIGMA_CONTROL = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
 
 
-def get_chick_data():
-    chicks = pd.read_table(
-        "/Users/dantwili/Research/adaptively_slamming_the_sham/nonadaptive/chickens.dat",
-        sep="\\s+",
-    )
+def get_chick_data(chick_data_path):
+    chicks = pd.read_table(chick_data_path, sep="\\s+")
     chicks["exposed_est"] -= 1
     chicks["sham_est"] -= 1
     chick_data = {
@@ -46,13 +43,6 @@ def posterior_summary(model, data):
         "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
         "sigma_b": np.std(np.mean(fit.b, axis=0)),
     }
-
-
-def simulate_optimize_ratio(params):
-    """
-    Simulate a set of experiments according to the multilevel model
-    as described im `simulate_experiments`. This function ad
-    """
 
 
 def simulate_experiments(params):
@@ -273,7 +263,7 @@ def repeat_inferences(model, reps, params, show_progress=False):
     return evaluations
 
 
-def evaluate_params(model, reps, params, show_progress=False):
+def evaluate_params(model, reps, params):
     # every value in params must be a list
     assert all(isinstance(value, Iterable) for value in params.values())
 
@@ -284,9 +274,11 @@ def evaluate_params(model, reps, params, show_progress=False):
     param_combinations = list(product(*params.values()))
 
     for i, param_values in tqdm(
-        enumerate(param_combinations), desc="Parameter Set", leave=False
+        enumerate(param_combinations),
+        desc="Parameter Set",
+        leave=False,
+        total=len(param_combinations),
     ):
-
         # Create a dictionary for the current combination of parameters
         current_params = dict(zip(param_keys, param_values))
         eval_current_params = repeat_inferences(model, reps, current_params)
@@ -295,10 +287,10 @@ def evaluate_params(model, reps, params, show_progress=False):
     return evaluation
 
 
-def evaluate_params_means(model, reps, params, show_progress=False):
+def evaluate_params_means(model, reps, params):
     params_with_mult_vals = [p for p in params if len(params[p]) > 1]
 
-    eval = evaluate_params(model, reps, params, show_progress)
+    eval = evaluate_params(model, reps, params)
     eval = eval.drop(columns=["iteration"])
 
     for variable in params_with_mult_vals:
