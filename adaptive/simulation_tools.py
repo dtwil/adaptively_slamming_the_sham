@@ -247,7 +247,7 @@ def repeat_inferences(model, reps, params, show_progress=False):
     evaluations = pd.DataFrame()
 
     for i in tqdm(range(reps)):
-        fake_data = simulate_experiments(**params)
+        fake_data = simulate_experiments(params)
 
         estimator_dfs = {
             "exposed_only": estimates_exposed_only(fake_data),
