@@ -1,5 +1,6 @@
 from itertools import product
 from collections.abc import Iterable
+import copy
 
 import pandas as pd
 import numpy as np
@@ -22,7 +23,16 @@ CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
 def expt_df_to_dict(expt_df):
     to_dict = expt_df.to_dict(orient="list")
     to_dict["num_expts"] = len(expt_df)
+    to_dict["expt_id"] = list(range(1, len(expt_df) + 1))
     return to_dict
+
+
+def expt_df_to_params(expt_df):
+    expt_df_copy = copy.deepcopy(expt_df)
+    params = expt_df_copy.attrs
+    params["num_subjects_per_expt"] = expt_df_copy["num_subjects_per_expt"]
+    params["prop_treatment"] = expt_df_copy["prop_treatment"]
+    return params
 
 
 def get_chick_data(chick_data_path):
@@ -41,7 +51,7 @@ def get_chick_data(chick_data_path):
 
 
 def posterior_summary(model, df):
-    fit = model.sample(data=expt_df_to_dict(df), show_progess=False)
+    fit = model.sample(data=expt_df_to_dict(df), show_progress=False)
     return {
         "mu_theta": np.mean(fit.theta),
         "mu_b": np.mean(fit.b),
@@ -78,6 +88,8 @@ def simulate_experiments(params):
     sigma_treatment = params["sigma_treatment"]
     sigma_control = params["sigma_control"]
 
+    assert isinstance(num_subjects_per_expt, np.ndarray)
+    assert isinstance(prop_treatment, np.ndarray)
     assert len(num_subjects_per_expt) == len(prop_treatment)
     assert sigma_theta >= 0 and sigma_b >= 0
     assert sigma_treatment >= 0 and sigma_control >= 0
@@ -98,21 +110,19 @@ def simulate_experiments(params):
             "avg_control_response": np.random.normal(b, sigma_y0),
             "treated_se": sigma_y1,
             "control_se": sigma_y0,
-            "expt_id": list(range(1, num_expts + 1)),
+            "num_subjects_per_expt": num_subjects_per_expt,
+            "prop_treatment": prop_treatment,
+            "theta": theta,
+            "b": b,
         }
     )
     expt_df.attrs = {
-        "num_expts": num_expts,
-        "num_subjects_per_expt": num_subjects_per_expt,
-        "prop_treatment": prop_treatment,
         "mu_b": mu_b,
         "mu_theta": mu_theta,
         "sigma_b": sigma_b,
         "sigma_theta": sigma_theta,
         "sigma_treatment": sigma_treatment,
         "sigma_control": sigma_control,
-        "theta": theta,
-        "b": b,
     }
 
     return expt_df
@@ -155,8 +165,8 @@ def _get_estimates(expt_df, estimator_fn, alpha=0.05, oracle=False, **kwargs):
         return eval_df
 
     # Add oracle metrics (only knowable in simulations)
-    eval_df["correct_sign"] = np.sign(expt_df.attrs["mu_theta"]) == np.sign(estimate)
-    eval_df["sample_error"] = expt_df.attrs["theta"] - estimate
+    eval_df["correct_sign"] = np.sign(expt_df["theta"]) == np.sign(estimate)
+    eval_df["sample_error"] = expt_df["theta"] - estimate
     eval_df["pop_error"] = expt_df.attrs["mu_theta"] - estimate
 
     return eval_df
@@ -308,7 +318,6 @@ def repeat_inferences(model, reps, params):
 
     for i in tqdm(range(reps), desc="Repetition", leave=False):
         expt_df = simulate_experiments(params)
-        params = expt_df.attrs
 
         estimator_dfs = {
             "exposed_only": get_exposed_only_estimates(expt_df, oracle=True),
