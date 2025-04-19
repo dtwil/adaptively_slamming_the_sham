@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from typing import Callable, Optional
 import copy
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 
 import pandas as pd
 import numpy as np
@@ -18,15 +19,15 @@ class ExperimentResult:
     params: dict
 
 
-class StanFitter:
+class StanFitter(ABC):
     def __init__(self, model: CmdStanModel):
         self.model = model
 
     def fit(self, expt: ExperimentResult, **kwargs) -> CmdStanMCMC:
         return self.model.sample(data=self.to_dict(expt), **kwargs)
 
-    def to_dict(self, expt: ExperimentResult) -> dict:
-        raise NotImplementedError
+    @abstractmethod
+    def to_dict(self, expt: ExperimentResult) -> dict: ...
 
 
 class StanFitterBasic(StanFitter):
@@ -69,10 +70,10 @@ class EstimatorResult:
     conf_upper: np.ndarray
     is_signif: np.ndarray
     correct_sign: np.ndarray
-    sample_error: np.ndarray
-    pop_error: np.ndarray
+    samp_err: np.ndarray
+    pop_err: np.ndarray
 
-    def to_frame(self) -> pd.DataFrame:
+    def to_df(self) -> pd.DataFrame:
         return pd.DataFrame(
             {
                 "estimate": self.estimate,
@@ -81,18 +82,18 @@ class EstimatorResult:
                 "conf_upper": self.conf_upper,
                 "is_signif": self.is_signif,
                 "correct_sign": self.correct_sign,
-                "sample_error": self.sample_error,
-                "pop_error": self.pop_error,
+                "samp_err": self.samp_err,
+                "pop_err": self.pop_err,
             }
         )
 
     def pop_rmse(self) -> float:
         """Calculate the population RMSE."""
-        return np.sqrt(np.mean(self.pop_error**2))
+        return np.sqrt(np.mean(self.pop_err**2))
 
     def sample_rmse(self) -> float:
         """Calculate the sample RMSE."""
-        return np.sqrt(np.mean(self.sample_error**2))
+        return np.sqrt(np.mean(self.samp_err**2))
 
 
 class ExperimentSimulator:
@@ -173,6 +174,69 @@ class ExperimentSimulator:
         return pd.concat(dfs, ignore_index=True)
 
 
+class Estimator(ABC):
+    @abstractmethod
+    def _compute(self, df: pd.DataFrame) -> dict: ...
+
+    def result(
+        self, expt: ExperimentResult, alpha: float = 0.05, **kwargs
+    ) -> EstimatorResult:
+        stats = self._compute(expt, alpha, **kwargs)
+        est, se = stats["estimate"], stats["se"]
+        lower, upper = stats["conf_lower"], stats["conf_upper"]
+        signif = ~((lower < 0) & (0 < upper))
+        correct = np.sign(expt.data["theta"].to_numpy()) == np.sign(est)
+        samp_err = expt.data["theta"].to_numpy() - est
+        pop_err = expt.params["mu_theta"] - est
+        return EstimatorResult(
+            est, se, lower, upper, signif, correct, samp_err, pop_err
+        )
+
+
+class ExposedOnlyEstimator(Estimator):
+    def _compute(self, expt: ExperimentResult, alpha: float) -> dict:
+        df = expt.data
+        z = stats.norm.ppf(1 - alpha / 2)
+        est, se = df["y1_bar"], df["sigma_y1_bar"]
+        return {
+            "estimate": est,
+            "se": se,
+            "conf_lower": est - z * se,
+            "conf_upper": est + z * se,
+        }
+
+
+class DifferenceEstimator(Estimator):
+    def _compute(self, expt: ExperimentResult, alpha: float) -> dict:
+        df = expt.data
+        z = stats.norm.ppf(1 - alpha / 2)
+        est = df["y1_bar"] - df["y0_bar"]
+        se = np.sqrt(df["sigma_y1_bar"] ** 2 + df["sigma_y0_bar"] ** 2)
+        return {
+            "estimate": est,
+            "se": se,
+            "conf_lower": est - z * se,
+            "conf_upper": est + z * se,
+        }
+
+
+class PosteriorMeanEstimator(Estimator):
+    def __init__(self, fitter: StanFitter):
+        super().__init__()
+        self.fitter = fitter
+
+    def _compute(self, expt: ExperimentResult, alpha: float, **kwargs):
+        fit = self.fitter.fit(expt=expt, **kwargs)
+        thetas = fit.stan_variable("theta")
+        est, se = np.mean(thetas, axis=0), np.std(thetas, axis=0)
+        return {
+            "estimate": est,
+            "se": se,
+            "conf_lower": np.quantile(thetas, alpha / 2, axis=0),
+            "conf_upper": np.quantile(thetas, 1 - alpha / 2, axis=0),
+        }
+
+
 CHICK_J = 38
 CHICK_N = 64
 CHICK_MU_THETA = 0.09769112704348468
@@ -239,7 +303,7 @@ def posterior_summary(model, df):
     }
 
 
-def simulate_experiments(params):
+def simulate_experiments(params) -> ExperimentResult:
     """
     Wrapper maintaining old API:
       params must include keys
@@ -254,156 +318,7 @@ def simulate_experiments(params):
         sigma1=params["sigma1"],
         sigma0=params["sigma0"],
     )
-    return sim.simulate(
-        params["n"],
-        params["p"],
-    ).data
-
-
-def _get_estimates(expt_df, estimator_fn, alpha=0.05, **kwargs):
-    """
-    expt_df: A pandas DataFrame with experiment data
-            (see the output of simulate_experiments)
-    estimator_fn: The function to use for estimating the parameters
-    alpha: The significance level for hypothesis testing
-
-    Returns: An EstimatorResult object with the following attributes:
-        - estimate: The estimated average response for the treated group
-        - se: The standard error of the estimate
-        - conf_lower: The lower bound of the confidence interval
-        - conf_upper: The upper bound of the confidence interval
-        - is_signif: A boolean indicating whether the estimate is significant
-        - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - sample_error: The error of the estimate compared to the true parameter value
-        - pop_error: The error of the estimate compared to the population parameter value
-    """
-    stats = estimator_fn(expt_df, alpha=alpha, **kwargs)
-    est = stats["estimate"]
-    se = stats["se"]
-    lower = stats["conf_lower"]
-    upper = stats["conf_upper"]
-    signif = ~((lower < 0) & (0 < upper))
-
-    # oracle metrics
-    correct = np.sign(expt_df["theta"].to_numpy()) == np.sign(est)
-    samp_err = expt_df["theta"].to_numpy() - est
-    pop_err = expt_df.attrs["mu_theta"] - est
-
-    return EstimatorResult(
-        estimate=est,
-        se=se,
-        conf_lower=lower,
-        conf_upper=upper,
-        is_signif=signif,
-        correct_sign=correct,
-        sample_error=samp_err,
-        pop_error=pop_err,
-    )
-
-
-def get_exposed_only_estimates(expt_df, alpha=0.05):
-    """
-    expt_df: A pandas DataFrame with experiment data
-            (see the output of simulate_experiments)
-    alpha: The significance level for hypothesis testing
-
-    Returns: An EstimatorResult object with the following attributes:
-        - estimate: The estimated average response for the treated group
-        - se: The standard error of the estimate
-        - conf_lower: The lower bound of the confidence interval
-        - conf_upper: The upper bound of the confidence interval
-        - is_signif: A boolean indicating whether the estimate is significant
-        - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - sample_error: The error of the estimate compared to the true parameter value
-        - pop_error: The error of the estimate compared to the population parameter value
-    """
-
-    def exposed_only_fn(expt_df, alpha=0.05):
-        estimate = expt_df["y_1"]
-        se = expt_df["sigma1"]
-        z_value = stats.norm.ppf(1 - alpha / 2)
-        conf_lower = estimate - z_value * se
-        conf_upper = estimate + z_value * se
-
-        return {
-            "estimate": estimate,
-            "se": se,
-            "conf_lower": conf_lower,
-            "conf_upper": conf_upper,
-        }
-
-    return _get_estimates(expt_df, exposed_only_fn, alpha=alpha)
-
-
-def get_difference_estimates(expt_df, alpha=0.05):
-    """
-    expt_df: A pandas DataFrame with experiment data
-            (see the output of simulate_experiments)
-    alpha: The significance level for hypothesis testing
-
-    Returns: An EstimatorResult object with the following attributes:
-        - estimate: The estimated average response for the treated group
-        - se: The standard error of the estimate
-        - conf_lower: The lower bound of the confidence interval
-        - conf_upper: The upper bound of the confidence interval
-        - is_signif: A boolean indicating whether the estimate is significant
-        - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - sample_error: The error of the estimate compared to the true parameter value
-        - pop_error: The error of the estimate compared to the population parameter value
-    """
-
-    def difference_fn(expt_df, alpha=0.05):
-        estimate = expt_df["y_1"] - expt_df["avg_control_response"]
-        se = np.sqrt(expt_df["sigma1"] ** 2 + expt_df["sigma0"] ** 2)
-        z_value = stats.norm.ppf(1 - alpha / 2)
-        conf_lower = estimate - z_value * se
-        conf_upper = estimate + z_value * se
-
-        return {
-            "estimate": estimate,
-            "se": se,
-            "conf_lower": conf_lower,
-            "conf_upper": conf_upper,
-        }
-
-    return _get_estimates(expt_df, difference_fn, alpha=alpha)
-
-
-def get_bayes_estimates(expt_df, model, alpha=0.05):
-    """
-    expt_df: A pandas DataFrame with experiment data
-            (see the output of simulate_experiments)
-    model: A cmdstanpy model object (not fitted)
-    alpha: The significance level for hypothesis testing
-
-    Returns: An EstimatorResult object with the following attributes:
-        - estimate: The estimated average response for the treated group
-        - se: The standard error of the estimate
-        - conf_lower: The lower bound of the confidence interval
-        - conf_upper: The upper bound of the confidence interval
-        - is_signif: A boolean indicating whether the estimate is significant
-        - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - sample_error: The error of the estimate compared to the true parameter value
-        - pop_error: The error of the estimate compared to the population parameter value
-    """
-
-    def bayes_fn(expt_df, alpha=0.05, model=model):
-        fit = model.sample(data=expt_df_to_dict(expt_df), show_progress=False)
-        estimate = np.mean(fit.stan_variable("theta"), axis=0)
-        se = np.std(fit.stan_variable("theta"), axis=0)
-
-        thetas = fit.stan_variable("theta")
-        conf_lower = np.quantile(thetas, alpha / 2, axis=0)
-        conf_upper = np.quantile(thetas, 1 - alpha / 2, axis=0)
-
-        return {
-            "estimate": estimate,
-            "se": se,
-            "conf_lower": conf_lower,
-            "conf_upper": conf_upper,
-        }
-
-    return _get_estimates(expt_df, bayes_fn, alpha=alpha, model=model)
+    return sim.simulate(params["n"], params["p"])
 
 
 def evaluate_estimates(estimates_df):
@@ -418,11 +333,11 @@ def evaluate_estimates(estimates_df):
 
         Note that this DataFrame has only one row.
     """
-    true_theta = estimates_df["estimate"] + estimates_df["sample_error"]
+    true_theta = estimates_df["estimate"] + estimates_df["samp_err"]
 
     prop_signif = np.mean(estimates_df["is_signif"])
-    sample_mse = np.mean(estimates_df["sample_error"] ** 2)
-    pop_mse = np.mean(estimates_df["pop_error"] ** 2)
+    sample_mse = np.mean(estimates_df["samp_err"] ** 2)
+    pop_mse = np.mean(estimates_df["pop_err"] ** 2)
     rank_corr = estimates_df["estimate"].corr(true_theta, method="spearman")
 
     is_signif = estimates_df["is_signif"]
@@ -449,13 +364,13 @@ def repeat_inferences(model, reps, params):
     evaluations = pd.DataFrame()
 
     for i in tqdm(range(reps), desc="Repetition", leave=False):
-        expt_df = simulate_experiments(params)
+        expt = simulate_experiments(params)
         estimator_dfs = {
-            name: res.to_frame()
-            for name, res in {
-                "exposed_only": get_exposed_only_estimates(expt_df),
-                "difference": get_difference_estimates(expt_df),
-                "bayes": get_bayes_estimates(expt_df, model=model),
+            name: est.estimate(expt).to_frame()
+            for name, est in {
+                "exposed_only": ExposedOnlyEstimator(alpha=0.05),
+                "difference": DifferenceEstimator(alpha=0.05),
+                "bayes": BayesEstimator(model=model, alpha=0.05),
             }.items()
         }
 
