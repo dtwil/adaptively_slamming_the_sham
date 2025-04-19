@@ -1,29 +1,201 @@
 from itertools import product
 from collections.abc import Iterable
+from typing import Callable, Optional
 import copy
+from dataclasses import dataclass
 
 import pandas as pd
 import numpy as np
 from scipy import stats
 
 from tqdm.auto import tqdm
+from cmdstanpy import CmdStanModel, CmdStanMCMC
 
 
-CHICK_NUM_EXPTS = 38
-CHICK_NUM_SUBJECTS_PER_EXPT = 64
+@dataclass
+class ExperimentResult:
+    data: pd.DataFrame
+    params: dict
+
+
+class StanFitter:
+    def __init__(self, model: CmdStanModel):
+        self.model = model
+
+    def fit(self, expt: ExperimentResult, **kwargs) -> CmdStanMCMC:
+        return self.model.sample(data=self.to_dict(expt), **kwargs)
+
+    def to_dict(self, expt: ExperimentResult) -> dict:
+        raise NotImplementedError
+
+
+class StanFitterBasic(StanFitter):
+    def to_dict(self, expt: ExperimentResult) -> dict:
+        return {
+            "J": len(expt.data),
+            "j": list(range(1, len(expt.data) + 1)),
+            "y1_bar": list(expt.data["y1_bar"]),
+            "y0_bar": list(expt.data["y0_bar"]),
+            "sigma_y1_bar": list(expt.data["sigma_y1_bar"]),
+            "sigma_y0_bar": list(expt.data["sigma_y0_bar"]),
+            "n": list(expt.data["n"]),
+            "p": list(expt.data["p"]),
+        }
+
+
+class StanFitterBasicWithHyperparams(StanFitter):
+    def to_dict(self, expt: ExperimentResult) -> dict:
+        return {
+            "J": len(expt.data),
+            "j": list(range(1, len(expt.data) + 1)),
+            "y1_bar": list(expt.data["y1_bar"]),
+            "y0_bar": list(expt.data["y0_bar"]),
+            "sigma_y1_bar": list(expt.data["sigma_y1_bar"]),
+            "sigma_y0_bar": list(expt.data["sigma_y0_bar"]),
+            "n": list(expt.data["n"]),
+            "p": list(expt.data["p"]),
+            "mu_b": expt.params["mu_b"],
+            "mu_theta": expt.params["mu_theta"],
+            "sigma_b": expt.params["sigma_b"],
+            "sigma_theta": expt.params["sigma_theta"],
+        }
+
+
+@dataclass
+class EstimatorResult:
+    estimate: np.ndarray
+    se: np.ndarray
+    conf_lower: np.ndarray
+    conf_upper: np.ndarray
+    is_signif: np.ndarray
+    correct_sign: np.ndarray
+    sample_error: np.ndarray
+    pop_error: np.ndarray
+
+    def to_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "estimate": self.estimate,
+                "se": self.se,
+                "conf_lower": self.conf_lower,
+                "conf_upper": self.conf_upper,
+                "is_signif": self.is_signif,
+                "correct_sign": self.correct_sign,
+                "sample_error": self.sample_error,
+                "pop_error": self.pop_error,
+            }
+        )
+
+    def pop_rmse(self) -> float:
+        """Calculate the population RMSE."""
+        return np.sqrt(np.mean(self.pop_error**2))
+
+    def sample_rmse(self) -> float:
+        """Calculate the sample RMSE."""
+        return np.sqrt(np.mean(self.sample_error**2))
+
+
+class ExperimentSimulator:
+    """Encapsulates MLM hyperparameters and simulation logic."""
+
+    def __init__(
+        self,
+        mu_b: float,
+        mu_theta: float,
+        sigma_b: float,
+        sigma_theta: float,
+        sigma1: float,
+        sigma0: float,
+    ):
+        self.mu_b = mu_b
+        self.mu_theta = mu_theta
+        self.sigma_b = sigma_b
+        self.sigma_theta = sigma_theta
+        self.sigma1 = sigma1
+        self.sigma0 = sigma0
+
+    def simulate(self, n: np.ndarray, p: np.ndarray) -> ExperimentResult:
+        """Simulate a batch of experiments."""
+        # Validate that treatment proportions are between 0 and 1
+        if np.any(p < 0) or np.any(p > 1):
+            raise ValueError(
+                f"All entries of p must lie in [0, 1]. "
+                f"Found p.min()={np.min(p)}, p.max()={np.max(p)}"
+            )
+
+        n_arr, p_arr = n, p
+        n1 = np.floor(p_arr * n_arr).astype(int)
+        n0 = n_arr - n1
+        sigma_y1_bar = self.sigma1 / np.sqrt(n1)
+        sigma_y0_bar = self.sigma0 / np.sqrt(n0)
+        theta = np.random.normal(self.mu_theta, self.sigma_theta, len(n_arr))
+        b = np.random.normal(self.mu_b, self.sigma_b, len(n_arr))
+
+        y1_bar = np.random.normal(theta + b, sigma_y1_bar)
+        y0_bar = np.random.normal(b, sigma_y0_bar)
+
+        df = pd.DataFrame(
+            {
+                "y1_bar": y1_bar,
+                "y0_bar": y0_bar,
+                "sigma_y1_bar": sigma_y1_bar,
+                "sigma_y0_bar": sigma_y0_bar,
+                "n": n_arr,
+                "p": p_arr,
+                "theta": theta,
+                "b": b,
+            }
+        )
+        params = {
+            "mu_b": self.mu_b,
+            "mu_theta": self.mu_theta,
+            "sigma_b": self.sigma_b,
+            "sigma_theta": self.sigma_theta,
+            "sigma1": self.sigma1,
+            "sigma0": self.sigma0,
+        }
+        return ExperimentResult(data=df, params=params)
+
+    def simulate_sequence(
+        self,
+        n: Iterable[int],
+        p_callback: Callable[[Optional[pd.DataFrame], int], float],
+    ) -> pd.DataFrame:
+        """
+        Simulate experiments one at a time.
+        p_callback(prev_df, n) should return the next treatment proportion.
+        """
+        dfs = []
+        for n in n:
+            prev = pd.concat(dfs, ignore_index=True) if dfs else None
+            p = p_callback(prev, n)
+            dfs.append(self.simulate(np.array([n]), np.array([p])).data)
+        return pd.concat(dfs, ignore_index=True)
+
+
+CHICK_J = 38
+CHICK_N = 64
 CHICK_MU_THETA = 0.09769112704348468
 CHICK_MU_B = 0.004112476586286136
 CHICK_SIGMA_THETA = 0.056385519973983916
 CHICK_SIGMA_B = 0.0015924804430524674
-CHICK_SIGMA_TREATMENT = (32**0.5) * 0.04
-CHICK_SIGMA_CONTROL = (32**0.5) * 0.04
+CHICK_SIGMA1 = (32**0.5) * 0.04
+CHICK_SIGMA0 = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
+CHICK_SIMULATOR = ExperimentSimulator(
+    mu_b=CHICK_MU_B,
+    mu_theta=CHICK_MU_THETA,
+    sigma_b=CHICK_SIGMA_B,
+    sigma_theta=CHICK_SIGMA_THETA,
+    sigma1=CHICK_SIGMA1,
+    sigma0=CHICK_SIGMA0,
+)
 
 
 def expt_df_to_dict(expt_df, remove_hyperparams=True):
     to_dict = expt_df.to_dict(orient="list")
-    to_dict["num_expts"] = len(expt_df)
-    to_dict["expt_id"] = list(range(1, len(expt_df) + 1))
+    to_dict["J"] = len(expt_df)
+    to_dict["j"] = list(range(1, len(expt_df) + 1))
 
     if remove_hyperparams:
         if "theta" in to_dict:
@@ -37,8 +209,8 @@ def expt_df_to_dict(expt_df, remove_hyperparams=True):
 def expt_df_to_params(expt_df):
     expt_df_copy = copy.deepcopy(expt_df)
     params = expt_df_copy.attrs
-    params["num_subjects_per_expt"] = expt_df_copy["num_subjects_per_expt"]
-    params["prop_treatment"] = expt_df_copy["prop_treatment"]
+    params["n"] = expt_df_copy["n"]
+    params["p"] = expt_df_copy["p"]
     return params
 
 
@@ -48,10 +220,10 @@ def get_chick_data(chick_data_path):
     chicks["sham_est"] -= 1
     chick_data = {
         "num_expts": len(chicks),
-        "avg_treated_response": chicks["exposed_est"],
+        "y_1": chicks["exposed_est"],
         "avg_control_response": chicks["sham_est"],
-        "treated_se": chicks["exposed_se"],
-        "control_se": chicks["sham_se"],
+        "sigma1": chicks["exposed_se"],
+        "sigma0": chicks["sham_se"],
         "expt_id": list(range(1, len(chicks) + 1)),
     }
     return chick_data
@@ -69,70 +241,23 @@ def posterior_summary(model, df):
 
 def simulate_experiments(params):
     """
-    Simulate a set of experiments according to the multilevel model:
-
-    b_j ~ N(mu_b, sigma_b^2)
-    theta_j ~ N(mu_theta, sigma_theta^2)
-
-    y_{j0} ~ N(b_j, sigma_control^2 / n_{j0})
-    y_{j1} ~ N(b_j + theta_j, sigma_treatment^2 / n_{j1})
-
-    where j is the experiment index, n_{j0} is the number of control subjects
-    in experiment j, and n_{j1} is the number of treated subjects in experiment j.
-    Note that n_{j1} = prop_treatment[j] * num_subjects_per_expt[j].
-
-    Returns: a dictionary whose entries are the true parameters of the model,
-    the number of experiments, the average treated and control responses,
-    the standard errors of the treated and control responses, and the
-    experiment IDs.
+    Wrapper maintaining old API:
+      params must include keys
+      ['n','p','mu_b','mu_theta',
+       'sigma_b','sigma_theta','sigma1','sigma0']
     """
-    num_subjects_per_expt = params["num_subjects_per_expt"]
-    prop_treatment = params["prop_treatment"]
-    mu_b = params["mu_b"]
-    mu_theta = params["mu_theta"]
-    sigma_b = params["sigma_b"]
-    sigma_theta = params["sigma_theta"]
-    sigma_treatment = params["sigma_treatment"]
-    sigma_control = params["sigma_control"]
-
-    assert isinstance(num_subjects_per_expt, np.ndarray)
-    assert isinstance(prop_treatment, np.ndarray)
-    assert len(num_subjects_per_expt) == len(prop_treatment)
-    assert sigma_theta >= 0 and sigma_b >= 0
-    assert sigma_treatment >= 0 and sigma_control >= 0
-
-    num_expts = len(num_subjects_per_expt)
-    num_treated = np.floor(prop_treatment * num_subjects_per_expt).astype(int)
-    num_control = num_subjects_per_expt - num_treated
-
-    sigma_y1 = sigma_treatment / np.sqrt(num_treated)
-    sigma_y0 = sigma_control / np.sqrt(num_control)
-
-    theta = np.random.normal(mu_theta, sigma_theta, num_expts)
-    b = np.random.normal(mu_b, sigma_b, num_expts)
-
-    expt_df = pd.DataFrame(
-        {
-            "avg_treated_response": np.random.normal(theta + b, sigma_y1),
-            "avg_control_response": np.random.normal(b, sigma_y0),
-            "treated_se": sigma_y1,
-            "control_se": sigma_y0,
-            "num_subjects_per_expt": num_subjects_per_expt,
-            "prop_treatment": prop_treatment,
-            "theta": theta,
-            "b": b,
-        }
+    sim = ExperimentSimulator(
+        mu_b=params["mu_b"],
+        mu_theta=params["mu_theta"],
+        sigma_b=params["sigma_b"],
+        sigma_theta=params["sigma_theta"],
+        sigma1=params["sigma1"],
+        sigma0=params["sigma0"],
     )
-    expt_df.attrs = {
-        "mu_b": mu_b,
-        "mu_theta": mu_theta,
-        "sigma_b": sigma_b,
-        "sigma_theta": sigma_theta,
-        "sigma_treatment": sigma_treatment,
-        "sigma_control": sigma_control,
-    }
-
-    return expt_df
+    return sim.simulate(
+        params["n"],
+        params["p"],
+    ).data
 
 
 def _get_estimates(expt_df, estimator_fn, alpha=0.05, **kwargs):
@@ -142,38 +267,38 @@ def _get_estimates(expt_df, estimator_fn, alpha=0.05, **kwargs):
     estimator_fn: The function to use for estimating the parameters
     alpha: The significance level for hypothesis testing
 
-    Returns: A pandas DataFrame with num_expt rows and the following columns:
+    Returns: An EstimatorResult object with the following attributes:
         - estimate: The estimated average response for the treated group
         - se: The standard error of the estimate
         - conf_lower: The lower bound of the confidence interval
         - conf_upper: The upper bound of the confidence interval
         - is_signif: A boolean indicating whether the estimate is significant
         - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - error: The error of the estimate compared to the true parameter value
+        - sample_error: The error of the estimate compared to the true parameter value
+        - pop_error: The error of the estimate compared to the population parameter value
     """
     stats = estimator_fn(expt_df, alpha=alpha, **kwargs)
-    estimate = stats["estimate"]
+    est = stats["estimate"]
     se = stats["se"]
-    conf_lower = stats["conf_lower"]
-    conf_upper = stats["conf_upper"]
-    significant = ~((conf_lower < 0) & (0 < conf_upper))
+    lower = stats["conf_lower"]
+    upper = stats["conf_upper"]
+    signif = ~((lower < 0) & (0 < upper))
 
-    eval_df = pd.DataFrame(
-        {
-            "estimate": estimate,
-            "se": se,
-            "conf_lower": conf_lower,
-            "conf_upper": conf_upper,
-            "is_signif": significant,
-        }
+    # oracle metrics
+    correct = np.sign(expt_df["theta"].to_numpy()) == np.sign(est)
+    samp_err = expt_df["theta"].to_numpy() - est
+    pop_err = expt_df.attrs["mu_theta"] - est
+
+    return EstimatorResult(
+        estimate=est,
+        se=se,
+        conf_lower=lower,
+        conf_upper=upper,
+        is_signif=signif,
+        correct_sign=correct,
+        sample_error=samp_err,
+        pop_error=pop_err,
     )
-
-    # Add oracle metrics (only knowable in simulations)
-    eval_df["correct_sign"] = np.sign(expt_df["theta"]) == np.sign(estimate)
-    eval_df["sample_error"] = expt_df["theta"] - estimate
-    eval_df["pop_error"] = expt_df.attrs["mu_theta"] - estimate
-
-    return eval_df
 
 
 def get_exposed_only_estimates(expt_df, alpha=0.05):
@@ -182,19 +307,20 @@ def get_exposed_only_estimates(expt_df, alpha=0.05):
             (see the output of simulate_experiments)
     alpha: The significance level for hypothesis testing
 
-    Returns: A pandas DataFrame with num_expt rows and the following columns:
+    Returns: An EstimatorResult object with the following attributes:
         - estimate: The estimated average response for the treated group
         - se: The standard error of the estimate
         - conf_lower: The lower bound of the confidence interval
         - conf_upper: The upper bound of the confidence interval
         - is_signif: A boolean indicating whether the estimate is significant
         - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - error: The error of the estimate compared to the true parameter value
+        - sample_error: The error of the estimate compared to the true parameter value
+        - pop_error: The error of the estimate compared to the population parameter value
     """
 
     def exposed_only_fn(expt_df, alpha=0.05):
-        estimate = expt_df["avg_treated_response"]
-        se = expt_df["treated_se"]
+        estimate = expt_df["y_1"]
+        se = expt_df["sigma1"]
         z_value = stats.norm.ppf(1 - alpha / 2)
         conf_lower = estimate - z_value * se
         conf_upper = estimate + z_value * se
@@ -215,19 +341,20 @@ def get_difference_estimates(expt_df, alpha=0.05):
             (see the output of simulate_experiments)
     alpha: The significance level for hypothesis testing
 
-    Returns: A pandas DataFrame with num_expt rows and the following columns:
+    Returns: An EstimatorResult object with the following attributes:
         - estimate: The estimated average response for the treated group
         - se: The standard error of the estimate
         - conf_lower: The lower bound of the confidence interval
         - conf_upper: The upper bound of the confidence interval
         - is_signif: A boolean indicating whether the estimate is significant
         - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - error: The error of the estimate compared to the true parameter value
+        - sample_error: The error of the estimate compared to the true parameter value
+        - pop_error: The error of the estimate compared to the population parameter value
     """
 
     def difference_fn(expt_df, alpha=0.05):
-        estimate = expt_df["avg_treated_response"] - expt_df["avg_control_response"]
-        se = np.sqrt(expt_df["treated_se"] ** 2 + expt_df["control_se"] ** 2)
+        estimate = expt_df["y_1"] - expt_df["avg_control_response"]
+        se = np.sqrt(expt_df["sigma1"] ** 2 + expt_df["sigma0"] ** 2)
         z_value = stats.norm.ppf(1 - alpha / 2)
         conf_lower = estimate - z_value * se
         conf_upper = estimate + z_value * se
@@ -249,14 +376,15 @@ def get_bayes_estimates(expt_df, model, alpha=0.05):
     model: A cmdstanpy model object (not fitted)
     alpha: The significance level for hypothesis testing
 
-    Returns: A pandas DataFrame with num_expt rows and the following columns:
+    Returns: An EstimatorResult object with the following attributes:
         - estimate: The estimated average response for the treated group
         - se: The standard error of the estimate
         - conf_lower: The lower bound of the confidence interval
         - conf_upper: The upper bound of the confidence interval
         - is_signif: A boolean indicating whether the estimate is significant
         - correct_sign: A boolean indicating whether the estimate has the correct sign
-        - error: The error of the estimate compared to the true parameter value
+        - sample_error: The error of the estimate compared to the true parameter value
+        - pop_error: The error of the estimate compared to the population parameter value
     """
 
     def bayes_fn(expt_df, alpha=0.05, model=model):
@@ -322,16 +450,18 @@ def repeat_inferences(model, reps, params):
 
     for i in tqdm(range(reps), desc="Repetition", leave=False):
         expt_df = simulate_experiments(params)
-
         estimator_dfs = {
-            "exposed_only": get_exposed_only_estimates(expt_df),
-            "difference": get_difference_estimates(expt_df),
-            "bayes": get_bayes_estimates(expt_df, model=model),
+            name: res.to_frame()
+            for name, res in {
+                "exposed_only": get_exposed_only_estimates(expt_df),
+                "difference": get_difference_estimates(expt_df),
+                "bayes": get_bayes_estimates(expt_df, model=model),
+            }.items()
         }
 
-        for estimator_name, estimates_df in estimator_dfs.items():
-            evaluation = evaluate_estimates(estimates_df)
-            evaluation["params"] = [params]  # Ensure the column is of type object
+        for estimator_name, df in estimator_dfs.items():
+            evaluation = evaluate_estimates(df)
+            evaluation["params"] = [params]
             evaluation["estimator"] = estimator_name
             evaluation["iteration"] = i + 1
             evaluations = pd.concat([evaluations, evaluation], ignore_index=True)
@@ -372,19 +502,15 @@ def evaluate_params_means(model, reps, params):
     for variable in params_with_mult_vals:
         eval[variable] = eval.apply(lambda x: x["params"][variable], axis=1)
 
-    # need to convert the prop_treatment column to a tuple for grouping
-    if "prop_treatment" in params_with_mult_vals:
-        eval["prop_treatment"] = eval.apply(
-            lambda x: tuple(x["params"]["prop_treatment"]), axis=1
-        )
+    # need to convert the p column to a tuple for grouping
+    if "p" in params_with_mult_vals:
+        eval["p"] = eval.apply(lambda x: tuple(x["params"]["p"]), axis=1)
 
     eval.drop(columns=["params"], inplace=True)
     grouped = eval.groupby(["estimator"] + params_with_mult_vals).mean().reset_index()
 
-    # convert prop_treatment back to a numpy array
-    if "prop_treatment" in params_with_mult_vals:
-        grouped["prop_treatment"] = grouped.apply(
-            lambda x: np.array(x["prop_treatment"]), axis=1
-        )
+    # convert p back to a numpy array
+    if "p" in params_with_mult_vals:
+        grouped["p"] = grouped.apply(lambda x: np.array(x["p"]), axis=1)
 
     return grouped
