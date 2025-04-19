@@ -20,10 +20,17 @@ CHICK_SIGMA_CONTROL = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
 
 
-def expt_df_to_dict(expt_df):
+def expt_df_to_dict(expt_df, remove_hyperparams=True):
     to_dict = expt_df.to_dict(orient="list")
     to_dict["num_expts"] = len(expt_df)
     to_dict["expt_id"] = list(range(1, len(expt_df) + 1))
+
+    if remove_hyperparams:
+        if "theta" in to_dict:
+            del to_dict["theta"]
+        if "b" in to_dict:
+            del to_dict["b"]
+
     return to_dict
 
 
