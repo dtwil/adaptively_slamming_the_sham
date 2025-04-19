@@ -132,7 +132,7 @@ class ExperimentSimulator(ABC):
         sigma_theta: float,
         sigma1: float,
         sigma0: float,
-        name: str | None = None,
+        identifier: dict,
     ):
         self.mu_b = mu_b
         self.mu_theta = mu_theta
@@ -148,7 +148,7 @@ class ExperimentSimulator(ABC):
             "sigma1": sigma1,
             "sigma0": sigma0,
         }
-        self.name = name
+        self.identifier = identifier
 
     @abstractmethod
     def simulate(self) -> ExperimentResult: ...
@@ -165,14 +165,16 @@ class StaticExperimentSimulator(ExperimentSimulator):
         sigma0: float,
         n: np.ndarray,
         p: np.ndarray,
-        name: str | None = None,
+        identifier: dict,
     ):
         if np.any(p < 0) or np.any(p > 1):
             raise ValueError(
                 f"All entries of p must lie in [0, 1]. "
                 f"Found p.min()={np.min(p)}, p.max()={np.max(p)}"
             )
-        super().__init__(mu_b, mu_theta, sigma_b, sigma_theta, sigma1, sigma0, name)
+        super().__init__(
+            mu_b, mu_theta, sigma_b, sigma_theta, sigma1, sigma0, identifier
+        )
         self.n = n
         self.p = p
 
@@ -215,14 +217,16 @@ class AdaptiveExperimentSimulator(ExperimentSimulator):
         J: int,
         p_callback: Callable[[ExperimentResult | None], float],
         n_callback: Callable[[ExperimentResult | None], int],
-        name: str | None = None,
+        identifier: dict,
     ):
         """
         Simulate experiments one at a time.
         p_callback(prev_df, n) should return the next treatment proportion.
         J is the total number of experiments to generate.
         """
-        super().__init__(mu_b, mu_theta, sigma_b, sigma_theta, sigma1, sigma0, name)
+        super().__init__(
+            mu_b, mu_theta, sigma_b, sigma_theta, sigma1, sigma0, identifier
+        )
         self.J = J
         self.p_callback = p_callback
         self.n_callback = n_callback
@@ -313,34 +317,54 @@ class PosteriorMeanEstimator(Estimator):
         }
 
 
-def simulate_and_estimate(
-    simulators: Iterable[ExperimentSimulator],
-    estimators: Iterable[Estimator],
-    num_reps: int,
-    alpha: float = 0.05,
-    **kwargs: Optional[dict],
-) -> pd.DataFrame:
-    df = pd.DataFrame()
-    for simulator in tqdm(simulators, desc="Simulators", leave=False):
-        for estimator in tqdm(estimators, desc="Estimators", leave=False):
-            new_df = None
-            for i in tqdm(range(num_reps), desc="Repetition", leave=False):
-                expt = simulator.simulate()
-                summary_df = estimator.result(expt, alpha, **kwargs).summary()
-                summary_df["iteration"] = i + 1
+@dataclass
+class SimulationAggregatorResult:
+    """
+    Encapsulates the logic for aggregating simulation results.
+    """
 
-                if new_df is None:
-                    new_df = summary_df
-                else:
-                    new_df = pd.concat([new_df, summary_df], ignore_index=True)
+    df: pd.DataFrame
 
-            # Add the simulator and estimators to the DataFrame
-            new_df["simulator"] = simulator.name
-            new_df["estimator"] = estimator.name
+    def means(self, group_by: Iterable[str]) -> pd.DataFrame:
+        """
+        Returns the mean of the simulation results.
+        """
+        return self.df.groupby(group_by).mean().reset_index()
 
-            # Add the new DataFrame to the main DataFrame
-            df = pd.concat([df, new_df], ignore_index=True)
-    return df
+
+@dataclass
+class SimulationAggregator:
+    """
+    Encapsulates the logic for aggregating simulation results.
+    """
+
+    simulators: Iterable[ExperimentSimulator]
+
+    def simulate(
+        self, estimators: Iterable[Estimator], num_reps: int, alpha: float, **kwargs
+    ) -> SimulationAggregatorResult:
+        df = pd.DataFrame()
+        for simulator in tqdm(self.simulators, desc="Simulators", leave=False):
+            for estimator in tqdm(estimators, desc="Estimators", leave=False):
+                new_df = None
+                for _ in tqdm(range(num_reps), desc="Repetition", leave=False):
+                    expt = simulator.simulate()
+                    summary_df = estimator.result(expt, alpha, **kwargs).summary()
+
+                    if new_df is None:
+                        new_df = summary_df
+                    else:
+                        new_df = pd.concat([new_df, summary_df], ignore_index=True)
+
+                # Add the simulator and estimators to the DataFrame
+                for id in simulator.identifier:
+                    new_df[id] = simulator.identifier[id]
+                new_df["estimator"] = estimator.name
+
+                # Add the new DataFrame to the main DataFrame
+                df = pd.concat([df, new_df], ignore_index=True)
+
+        return SimulationAggregatorResult(df)
 
 
 def next_p_star(expt: ExperimentResult, n: int) -> float:
@@ -377,180 +401,5 @@ CHICK_SIMULATOR = StaticExperimentSimulator(
     sigma0=CHICK_SIGMA0,
     n=np.array([CHICK_N] * CHICK_J),
     p=np.array([0.5] * CHICK_J),
-    name="chick_simulator",
+    identifier={"name": "chick_simulator"},
 )
-
-
-def expt_df_to_dict(expt_df, remove_hyperparams=True):
-    to_dict = expt_df.to_dict(orient="list")
-    to_dict["J"] = len(expt_df)
-    to_dict["j"] = list(range(1, len(expt_df) + 1))
-
-    if remove_hyperparams:
-        if "theta" in to_dict:
-            del to_dict["theta"]
-        if "b" in to_dict:
-            del to_dict["b"]
-
-    return to_dict
-
-
-def expt_df_to_params(expt_df):
-    expt_df_copy = copy.deepcopy(expt_df)
-    params = expt_df_copy.attrs
-    params["n"] = expt_df_copy["n"]
-    params["p"] = expt_df_copy["p"]
-    return params
-
-
-def get_chick_data(chick_data_path):
-    chicks = pd.read_table(chick_data_path, sep="\\s+")
-    chicks["exposed_est"] -= 1
-    chicks["sham_est"] -= 1
-    chick_data = {
-        "num_expts": len(chicks),
-        "y_1": chicks["exposed_est"],
-        "avg_control_response": chicks["sham_est"],
-        "sigma1": chicks["exposed_se"],
-        "sigma0": chicks["sham_se"],
-        "expt_id": list(range(1, len(chicks) + 1)),
-    }
-    return chick_data
-
-
-def posterior_summary(model, df):
-    fit = model.sample(data=expt_df_to_dict(df), show_progress=False)
-    return {
-        "mu_theta": np.mean(fit.theta),
-        "mu_b": np.mean(fit.b),
-        "sigma_theta": np.std(np.mean(fit.theta, axis=0)),
-        "sigma_b": np.std(np.mean(fit.b, axis=0)),
-    }
-
-
-def simulate_experiments(params) -> ExperimentResult:
-    """
-    Wrapper maintaining old API:
-      params must include keys
-      ['n','p','mu_b','mu_theta',
-       'sigma_b','sigma_theta','sigma1','sigma0']
-    """
-    sim = ExperimentSimulator(
-        mu_b=params["mu_b"],
-        mu_theta=params["mu_theta"],
-        sigma_b=params["sigma_b"],
-        sigma_theta=params["sigma_theta"],
-        sigma1=params["sigma1"],
-        sigma0=params["sigma0"],
-    )
-    return sim.simulate(params["n"], params["p"])
-
-
-def evaluate_estimates(estimates_df):
-    """
-    estimates_df: A pandas DataFrame of the type returned by the above 'estimates' functions.
-
-    Returns: A pandas DataFrame with the following columns:
-        - prop_signif: The proportion of estimates that are significant
-        - sample_mse: The mean of (estimate[j] - theta[j])^2
-        - pop_mse: The mean of (estimate[j] - mu_theta)^2
-        - type_s_rate: The type S error rate (the proportion of estimates that are significant but have the wrong sign)
-
-        Note that this DataFrame has only one row.
-    """
-    true_theta = estimates_df["estimate"] + estimates_df["samp_err"]
-
-    prop_signif = np.mean(estimates_df["is_signif"])
-    sample_mse = np.mean(estimates_df["samp_err"] ** 2)
-    pop_mse = np.mean(estimates_df["pop_err"] ** 2)
-    rank_corr = estimates_df["estimate"].corr(true_theta, method="spearman").statistic
-
-    is_signif = estimates_df["is_signif"]
-    correct_sign = estimates_df["correct_sign"]
-    is_type_s_error = is_signif & ~correct_sign
-    type_s_rate = (
-        len(estimates_df[is_type_s_error]) / len(estimates_df)
-        if len(estimates_df) > 0
-        else 0
-    )
-
-    return pd.DataFrame(
-        {
-            "prop_signif": [prop_signif],
-            "sample_mse": [sample_mse],
-            "pop_mse": [pop_mse],
-            "type_s_rate": [type_s_rate],
-            "rank_corr": [rank_corr],
-        }
-    )
-
-
-def repeat_inferences(model, reps, params):
-    evaluations = pd.DataFrame()
-
-    for i in tqdm(range(reps), desc="Repetition", leave=False):
-        expt = simulate_experiments(params)
-        new_dfs = {
-            name: est.estimate(expt).to_frame()
-            for name, est in {
-                "exposed_only": ExposedOnlyEstimator(alpha=0.05),
-                "difference": DifferenceEstimator(alpha=0.05),
-                "bayes": BayesEstimator(model=model, alpha=0.05),
-            }.items()
-        }
-
-        for estimator_name, df in new_dfs.items():
-            evaluation = evaluate_estimates(df)
-            evaluation["params"] = [params]
-            evaluation["estimator"] = estimator_name
-            evaluation["iteration"] = i + 1
-            evaluations = pd.concat([evaluations, evaluation], ignore_index=True)
-
-    return evaluations
-
-
-def evaluate_params(model, reps, params):
-    # every value in params must be a list
-    assert all(isinstance(value, Iterable) for value in params.values())
-
-    evaluation = pd.DataFrame()
-
-    # Generate all combinations of parameter values
-    param_keys = list(params.keys())
-    param_combinations = list(product(*params.values()))
-
-    for i, param_values in tqdm(
-        enumerate(param_combinations),
-        desc="Parameter Combination",
-        leave=False,
-        total=len(param_combinations),
-    ):
-        # Create a dictionary for the current combination of parameters
-        current_params = dict(zip(param_keys, param_values))
-        eval_current_params = repeat_inferences(model, reps, current_params)
-        evaluation = pd.concat([evaluation, eval_current_params], ignore_index=True)
-
-    return evaluation
-
-
-def evaluate_params_means(model, reps, params):
-    params_with_mult_vals = [p for p in params if len(params[p]) > 1]
-
-    eval = evaluate_params(model, reps, params)
-    eval = eval.drop(columns=["iteration"])
-
-    for variable in params_with_mult_vals:
-        eval[variable] = eval.apply(lambda x: x["params"][variable], axis=1)
-
-    # need to convert the p column to a tuple for grouping
-    if "p" in params_with_mult_vals:
-        eval["p"] = eval.apply(lambda x: tuple(x["params"]["p"]), axis=1)
-
-    eval.drop(columns=["params"], inplace=True)
-    grouped = eval.groupby(["estimator"] + params_with_mult_vals).mean().reset_index()
-
-    # convert p back to a numpy array
-    if "p" in params_with_mult_vals:
-        grouped["p"] = grouped.apply(lambda x: np.array(x["p"]), axis=1)
-
-    return grouped
