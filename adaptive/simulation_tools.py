@@ -1,4 +1,3 @@
-from itertools import product
 from collections.abc import Iterable
 from typing import Callable, Optional
 import copy
@@ -324,21 +323,37 @@ class SimulationAggregatorResult:
     """
 
     df: pd.DataFrame
+    identifiers: list[str]
 
-    def means(self, group_by: Iterable[str]) -> pd.DataFrame:
+    def means(self) -> pd.DataFrame:
         """
         Returns the mean of the simulation results.
         """
-        return self.df.groupby(group_by).mean().reset_index()
+        return self.df.groupby(self.identifiers).mean().reset_index()
 
 
-@dataclass
 class SimulationAggregator:
     """
     Encapsulates the logic for aggregating simulation results.
+    Assumes all simulators have the same identifier keys.
     """
 
-    simulators: Iterable[ExperimentSimulator]
+    def __init__(self, simulators: Iterable[ExperimentSimulator]):
+        self.simulators = list(simulators)
+        if self.simulators:
+            # collect the key‐set of the first simulator
+            common_keys = set(self.simulators[0].identifier.keys())
+            # ensure all simulators share the same identifier keys
+            for sim in self.simulators[1:]:
+                if set(sim.identifier.keys()) != common_keys:
+                    raise ValueError(
+                        f"All simulators must have the same identifier keys. "
+                        f"Expected {common_keys}, got {set(sim.identifier.keys())} from {sim}"
+                    )
+
+        self.identifiers = list(
+            self.simulators[0].identifier.keys() if self.simulators else []
+        )
 
     def simulate(
         self, estimators: Iterable[Estimator], num_reps: int, alpha: float, **kwargs
@@ -364,7 +379,7 @@ class SimulationAggregator:
                 # Add the new DataFrame to the main DataFrame
                 df = pd.concat([df, new_df], ignore_index=True)
 
-        return SimulationAggregatorResult(df)
+        return SimulationAggregatorResult(df, list(self.identifiers) + ["estimator"])
 
 
 def next_p_star(expt: ExperimentResult, n: int) -> float:
