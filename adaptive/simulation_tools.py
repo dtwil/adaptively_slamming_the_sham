@@ -87,6 +87,18 @@ class EstimatorResult:
             }
         )
 
+    def summary(self) -> pd.DataFrame:
+        """Return a summary of the estimator results."""
+        return pd.DataFrame(
+            {
+                "prop_signif": [np.mean(self.is_signif)],
+                "sample_rmse": [self.sample_rmse()],
+                "pop_rmse": [self.pop_rmse()],
+                "type_s_rate": [self.type_s_rate()],
+                "rank_corr": [self.rank_corr()],
+            }
+        )
+
     def pop_rmse(self) -> float:
         """Calculate the population RMSE."""
         return np.sqrt(np.mean(self.pop_err**2))
@@ -95,8 +107,21 @@ class EstimatorResult:
         """Calculate the sample RMSE."""
         return np.sqrt(np.mean(self.samp_err**2))
 
+    def type_s_rate(self) -> float:
+        """Calculate the type S error rate."""
+        is_type_s_error = self.is_signif & ~self.correct_sign
+        if len(is_type_s_error) > 0:
+            return np.sum(is_type_s_error) / len(is_type_s_error)
+        else:
+            return 0.0
 
-class ExperimentSimulator:
+    def rank_corr(self) -> float:
+        """Calculate the rank correlation between the estimate and the true theta."""
+        theta = self.estimate + self.samp_err
+        return stats.spearmanr(self.estimate, theta).statistic
+
+
+class ExperimentSimulator(ABC):
     """Encapsulates MLM hyperparameters and simulation logic."""
 
     def __init__(
@@ -107,6 +132,7 @@ class ExperimentSimulator:
         sigma_theta: float,
         sigma1: float,
         sigma0: float,
+        name: str | None = None,
     ):
         self.mu_b = mu_b
         self.mu_theta = mu_theta
@@ -114,23 +140,50 @@ class ExperimentSimulator:
         self.sigma_theta = sigma_theta
         self.sigma1 = sigma1
         self.sigma0 = sigma0
+        self.params = {
+            "mu_b": mu_b,
+            "mu_theta": mu_theta,
+            "sigma_b": sigma_b,
+            "sigma_theta": sigma_theta,
+            "sigma1": sigma1,
+            "sigma0": sigma0,
+        }
+        self.name = name
 
-    def simulate(self, n: np.ndarray, p: np.ndarray) -> ExperimentResult:
-        """Simulate a batch of experiments."""
-        # Validate that treatment proportions are between 0 and 1
+    @abstractmethod
+    def simulate(self) -> ExperimentResult: ...
+
+
+class StaticExperimentSimulator(ExperimentSimulator):
+    def __init__(
+        self,
+        mu_b: float,
+        mu_theta: float,
+        sigma_b: float,
+        sigma_theta: float,
+        sigma1: float,
+        sigma0: float,
+        n: np.ndarray,
+        p: np.ndarray,
+        name: str | None = None,
+    ):
         if np.any(p < 0) or np.any(p > 1):
             raise ValueError(
                 f"All entries of p must lie in [0, 1]. "
                 f"Found p.min()={np.min(p)}, p.max()={np.max(p)}"
             )
+        super().__init__(mu_b, mu_theta, sigma_b, sigma_theta, sigma1, sigma0, name)
+        self.n = n
+        self.p = p
 
-        n_arr, p_arr = n, p
-        n1 = np.floor(p_arr * n_arr).astype(int)
-        n0 = n_arr - n1
+    def simulate(self) -> ExperimentResult:
+        """Simulate a batch of experiments."""
+        n1 = np.floor(self.p * self.n).astype(int)
+        n0 = self.n - n1
         sigma_y1_bar = self.sigma1 / np.sqrt(n1)
         sigma_y0_bar = self.sigma0 / np.sqrt(n0)
-        theta = np.random.normal(self.mu_theta, self.sigma_theta, len(n_arr))
-        b = np.random.normal(self.mu_b, self.sigma_b, len(n_arr))
+        theta = np.random.normal(self.mu_theta, self.sigma_theta, len(self.n))
+        b = np.random.normal(self.mu_b, self.sigma_b, len(self.n))
 
         y1_bar = np.random.normal(theta + b, sigma_y1_bar)
         y0_bar = np.random.normal(b, sigma_y0_bar)
@@ -141,37 +194,53 @@ class ExperimentSimulator:
                 "y0_bar": y0_bar,
                 "sigma_y1_bar": sigma_y1_bar,
                 "sigma_y0_bar": sigma_y0_bar,
-                "n": n_arr,
-                "p": p_arr,
+                "n": self.n,
+                "p": self.p,
                 "theta": theta,
                 "b": b,
             }
         )
-        params = {
-            "mu_b": self.mu_b,
-            "mu_theta": self.mu_theta,
-            "sigma_b": self.sigma_b,
-            "sigma_theta": self.sigma_theta,
-            "sigma1": self.sigma1,
-            "sigma0": self.sigma0,
-        }
-        return ExperimentResult(data=df, params=params)
+        return ExperimentResult(data=df, params=self.params)
 
-    def simulate_sequence(
+
+class AdaptiveExperimentSimulator(ExperimentSimulator):
+    def __init__(
         self,
-        n: Iterable[int],
-        p_callback: Callable[[Optional[pd.DataFrame], int], float],
-    ) -> pd.DataFrame:
+        mu_b: float,
+        mu_theta: float,
+        sigma_b: float,
+        sigma_theta: float,
+        sigma1: float,
+        sigma0: float,
+        J: int,
+        p_callback: Callable[[ExperimentResult | None], float],
+        n_callback: Callable[[ExperimentResult | None], int],
+        name: str | None = None,
+    ):
         """
         Simulate experiments one at a time.
         p_callback(prev_df, n) should return the next treatment proportion.
+        J is the total number of experiments to generate.
         """
-        dfs = []
-        for n in n:
-            prev = pd.concat(dfs, ignore_index=True) if dfs else None
-            p = p_callback(prev, n)
-            dfs.append(self.simulate(np.array([n]), np.array([p])).data)
-        return pd.concat(dfs, ignore_index=True)
+        super().__init__(mu_b, mu_theta, sigma_b, sigma_theta, sigma1, sigma0, name)
+        self.J = J
+        self.p_callback = p_callback
+        self.n_callback = n_callback
+
+    def simulate(self) -> pd.DataFrame:
+        # Simulate the first experiment
+        static = StaticExperimentSimulator(**self.params)
+        expt = static.simulate([self.n_callback(None)], [self.p_callback(None)])
+
+        # simulate the rest of the experiments
+        for j in range(1, self.J):
+            next_expt = static.simulate(
+                [self.n_callback(expt)], [self.p_callback(expt)]
+            )
+            merged_dfs = pd.concat([expt.data, next_expt.data], ignore_index=True)
+            expt = ExperimentResult(data=merged_dfs, params=self.params)
+
+        return expt
 
 
 class Estimator(ABC):
@@ -194,7 +263,10 @@ class Estimator(ABC):
 
 
 class ExposedOnlyEstimator(Estimator):
-    def _compute(self, expt: ExperimentResult, alpha: float) -> dict:
+    def __init__(self):
+        self.name = "Exposed Only"
+
+    def _compute(self, expt: ExperimentResult, alpha: float, **kwargs) -> dict:
         df = expt.data
         z = stats.norm.ppf(1 - alpha / 2)
         est, se = df["y1_bar"], df["sigma_y1_bar"]
@@ -207,7 +279,10 @@ class ExposedOnlyEstimator(Estimator):
 
 
 class DifferenceEstimator(Estimator):
-    def _compute(self, expt: ExperimentResult, alpha: float) -> dict:
+    def __init__(self):
+        self.name = "Difference"
+
+    def _compute(self, expt: ExperimentResult, alpha: float, **kwargs) -> dict:
         df = expt.data
         z = stats.norm.ppf(1 - alpha / 2)
         est = df["y1_bar"] - df["y0_bar"]
@@ -224,6 +299,7 @@ class PosteriorMeanEstimator(Estimator):
     def __init__(self, fitter: StanFitter):
         super().__init__()
         self.fitter = fitter
+        self.name = "Posterior Mean"
 
     def _compute(self, expt: ExperimentResult, alpha: float, **kwargs):
         fit = self.fitter.fit(expt=expt, **kwargs)
@@ -237,6 +313,52 @@ class PosteriorMeanEstimator(Estimator):
         }
 
 
+def simulate_and_estimate(
+    simulators: Iterable[ExperimentSimulator],
+    estimators: Iterable[Estimator],
+    num_reps: int,
+    alpha: float = 0.05,
+    **kwargs: Optional[dict],
+) -> pd.DataFrame:
+    df = pd.DataFrame()
+    for simulator in tqdm(simulators, desc="Simulators", leave=False):
+        for estimator in tqdm(estimators, desc="Estimators", leave=False):
+            new_df = None
+            for i in tqdm(range(num_reps), desc="Repetition", leave=False):
+                expt = simulator.simulate()
+                summary_df = estimator.result(expt, alpha, **kwargs).summary()
+                summary_df["iteration"] = i + 1
+
+                if new_df is None:
+                    new_df = summary_df
+                else:
+                    new_df = pd.concat([new_df, summary_df], ignore_index=True)
+
+            # Add the simulator and estimators to the DataFrame
+            new_df["simulator"] = simulator.name
+            new_df["estimator"] = estimator.name
+
+            # Add the new DataFrame to the main DataFrame
+            df = pd.concat([df, new_df], ignore_index=True)
+    return df
+
+
+def next_p_star(expt: ExperimentResult, n: int) -> float:
+    """
+    Calculate the p* value for the given experiment.
+    n is the sample size of the next experiment.
+    """
+    sigma0 = expt.params["sigma0"]
+    sigma1 = expt.params["sigma1"]
+    sigma_b = expt.params["sigma_b"]
+
+    numer = 1 + sigma0**2 / (n * sigma_b**2)
+    denom = 1 + sigma0 / sigma1
+    p_star = numer / denom
+
+    return p_star
+
+
 CHICK_J = 38
 CHICK_N = 64
 CHICK_MU_THETA = 0.09769112704348468
@@ -246,13 +368,16 @@ CHICK_SIGMA_B = 0.0015924804430524674
 CHICK_SIGMA1 = (32**0.5) * 0.04
 CHICK_SIGMA0 = (32**0.5) * 0.04
 CHICK_SIGMA_B_GRID = np.arange(0, 0.11, 0.01)
-CHICK_SIMULATOR = ExperimentSimulator(
+CHICK_SIMULATOR = StaticExperimentSimulator(
     mu_b=CHICK_MU_B,
     mu_theta=CHICK_MU_THETA,
     sigma_b=CHICK_SIGMA_B,
     sigma_theta=CHICK_SIGMA_THETA,
     sigma1=CHICK_SIGMA1,
     sigma0=CHICK_SIGMA0,
+    n=np.array([CHICK_N] * CHICK_J),
+    p=np.array([0.5] * CHICK_J),
+    name="chick_simulator",
 )
 
 
@@ -338,7 +463,7 @@ def evaluate_estimates(estimates_df):
     prop_signif = np.mean(estimates_df["is_signif"])
     sample_mse = np.mean(estimates_df["samp_err"] ** 2)
     pop_mse = np.mean(estimates_df["pop_err"] ** 2)
-    rank_corr = estimates_df["estimate"].corr(true_theta, method="spearman")
+    rank_corr = estimates_df["estimate"].corr(true_theta, method="spearman").statistic
 
     is_signif = estimates_df["is_signif"]
     correct_sign = estimates_df["correct_sign"]
@@ -365,7 +490,7 @@ def repeat_inferences(model, reps, params):
 
     for i in tqdm(range(reps), desc="Repetition", leave=False):
         expt = simulate_experiments(params)
-        estimator_dfs = {
+        new_dfs = {
             name: est.estimate(expt).to_frame()
             for name, est in {
                 "exposed_only": ExposedOnlyEstimator(alpha=0.05),
@@ -374,7 +499,7 @@ def repeat_inferences(model, reps, params):
             }.items()
         }
 
-        for estimator_name, df in estimator_dfs.items():
+        for estimator_name, df in new_dfs.items():
             evaluation = evaluate_estimates(df)
             evaluation["params"] = [params]
             evaluation["estimator"] = estimator_name
