@@ -135,7 +135,7 @@ def simulate_experiments(params):
     return expt_df
 
 
-def _get_estimates(expt_df, estimator_fn, alpha=0.05, oracle=False, **kwargs):
+def _get_estimates(expt_df, estimator_fn, alpha=0.05, **kwargs):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
@@ -168,9 +168,6 @@ def _get_estimates(expt_df, estimator_fn, alpha=0.05, oracle=False, **kwargs):
         }
     )
 
-    if not oracle:
-        return eval_df
-
     # Add oracle metrics (only knowable in simulations)
     eval_df["correct_sign"] = np.sign(expt_df["theta"]) == np.sign(estimate)
     eval_df["sample_error"] = expt_df["theta"] - estimate
@@ -179,7 +176,7 @@ def _get_estimates(expt_df, estimator_fn, alpha=0.05, oracle=False, **kwargs):
     return eval_df
 
 
-def get_exposed_only_estimates(expt_df, alpha=0.05, oracle=False):
+def get_exposed_only_estimates(expt_df, alpha=0.05):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
@@ -209,10 +206,10 @@ def get_exposed_only_estimates(expt_df, alpha=0.05, oracle=False):
             "conf_upper": conf_upper,
         }
 
-    return _get_estimates(expt_df, exposed_only_fn, alpha=alpha, oracle=oracle)
+    return _get_estimates(expt_df, exposed_only_fn, alpha=alpha)
 
 
-def get_difference_estimates(expt_df, alpha=0.05, oracle=False):
+def get_difference_estimates(expt_df, alpha=0.05):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
@@ -242,10 +239,10 @@ def get_difference_estimates(expt_df, alpha=0.05, oracle=False):
             "conf_upper": conf_upper,
         }
 
-    return _get_estimates(expt_df, difference_fn, alpha=alpha, oracle=oracle)
+    return _get_estimates(expt_df, difference_fn, alpha=alpha)
 
 
-def get_bayes_estimates(expt_df, model, alpha=0.05, oracle=False):
+def get_bayes_estimates(expt_df, model, alpha=0.05):
     """
     expt_df: A pandas DataFrame with experiment data
             (see the output of simulate_experiments)
@@ -278,7 +275,7 @@ def get_bayes_estimates(expt_df, model, alpha=0.05, oracle=False):
             "conf_upper": conf_upper,
         }
 
-    return _get_estimates(expt_df, bayes_fn, alpha=alpha, oracle=oracle, model=model)
+    return _get_estimates(expt_df, bayes_fn, alpha=alpha, model=model)
 
 
 def evaluate_estimates(estimates_df):
@@ -327,9 +324,9 @@ def repeat_inferences(model, reps, params):
         expt_df = simulate_experiments(params)
 
         estimator_dfs = {
-            "exposed_only": get_exposed_only_estimates(expt_df, oracle=True),
-            "difference": get_difference_estimates(expt_df, oracle=True),
-            "bayes": get_bayes_estimates(expt_df, oracle=True, model=model),
+            "exposed_only": get_exposed_only_estimates(expt_df),
+            "difference": get_difference_estimates(expt_df),
+            "bayes": get_bayes_estimates(expt_df, model=model),
         }
 
         for estimator_name, estimates_df in estimator_dfs.items():
