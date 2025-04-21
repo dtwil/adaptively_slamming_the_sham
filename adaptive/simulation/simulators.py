@@ -118,14 +118,25 @@ class AdaptiveExperimentSimulator(ExperimentSimulator):
 
     def simulate(self) -> pd.DataFrame:
         # Simulate the first experiment
-        static = StaticExperimentSimulator(**self.params)
-        expt = static.simulate([self.n_callback(None)], [self.p_callback(None)])
+        n_initial = self.n_callback(None)
+        static = StaticExperimentSimulator(
+            **self.params,
+            n=np.array([n_initial]),
+            p=np.array([self.p_callback(None, n_initial)]),
+            identifier=self.identifier,
+        )
+        expt = static.simulate()
 
         # simulate the rest of the experiments
         for j in range(1, self.J):
-            next_expt = static.simulate(
-                [self.n_callback(expt)], [self.p_callback(expt)]
+            next_n = self.n_callback(expt)
+            static = StaticExperimentSimulator(
+                **self.params,
+                n=np.array([next_n]),
+                p=np.array([self.p_callback(None, next_n)]),
+                identifier=self.identifier,
             )
+            next_expt = static.simulate()
             merged_dfs = pd.concat([expt.data, next_expt.data], ignore_index=True)
             expt = ExperimentResult(data=merged_dfs, params=self.params)
 
