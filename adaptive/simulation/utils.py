@@ -1,6 +1,11 @@
 import numpy as np
+import os
+import pickle
+import re
+from datetime import datetime
 
 from .results import ExperimentResult
+from .simulators import ExperimentSimulator
 from .simulators import StaticExperimentSimulator
 
 CHICK_J = 38
@@ -59,3 +64,71 @@ def sigma_b_hat(expt: ExperimentResult) -> float:
         return 1e-4
 
     return var_b_hat**0.5
+
+
+def theta_posterior_variance(simulator: ExperimentSimulator) -> float:
+    """
+    Returns a vector of the posterior variance of theta for each experiment.
+    """
+    params = simulator.params()
+    sigma1 = params["sigma1"]
+    sigma0 = params["sigma0"]
+    p = simulator.p
+    n = simulator.n
+    sigma_theta = params["sigma_theta"]
+    sigma_b = params["sigma_b"]
+
+    V1 = sigma1**2 / (p * n)
+    V0 = sigma0**2 / ((1 - p) * n)
+
+    A = 1.0 / V1 + 1.0 / (sigma_theta**2)
+    B = 1.0 / V1 + 1.0 / V0 + 1.0 / (sigma_b**2)
+    C = 1.0 / V1
+
+    denom = A * B - C**2
+    theta_post_var = B / denom
+
+    return theta_post_var
+
+
+def load_latest_simulation(data_dir, prefix):
+    # Regex to match filenames like: sim_results_v2_20250429_143512.pkl
+    pattern = re.compile(rf"{prefix}_(\d{{8}}_\d{{6}})\.pkl")
+
+    # List and filter files
+    files = [f for f in os.listdir(data_dir) if pattern.match(f)]
+
+    if not files:
+        raise FileNotFoundError("No compatible simulation files found.")
+
+    # Sort by timestamp extracted from filename
+    files.sort(key=lambda f: pattern.match(f).group(1), reverse=True)
+    latest_file = os.path.join(data_dir, files[0])
+
+    # Load and verify schema
+    with open(latest_file, "rb") as f:
+        data = pickle.load(f)
+
+    return data
+
+
+def save_simulation(results, data_dir, prefix):
+    """
+    Saves a simulation result with a timestamped filename.
+
+    Parameters:
+        results (any): The data to save.
+        metadata (dict): Optional metadata (e.g. schema_version, config, timestamp).
+        data_dir (str): Directory to save the file in.
+        prefix (str): Filename prefix before the timestamp.
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{prefix}_{timestamp}.pkl"
+    full_path = os.path.join(data_dir, filename)
+
+    with open(full_path, "wb") as f:
+        pickle.dump(results, f)
+
+    print(f"Saved simulation to {full_path}")
+    return full_path

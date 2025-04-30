@@ -25,15 +25,17 @@ class ExperimentSimulator(ABC):
         self.sigma_theta = sigma_theta
         self.sigma1 = sigma1
         self.sigma0 = sigma0
-        self.params = {
-            "mu_b": mu_b,
-            "mu_theta": mu_theta,
-            "sigma_b": sigma_b,
-            "sigma_theta": sigma_theta,
-            "sigma1": sigma1,
-            "sigma0": sigma0,
-        }
         self.identifier = identifier
+
+    def params(self) -> dict:
+        return {
+            "mu_b": self.mu_b,
+            "mu_theta": self.mu_theta,
+            "sigma_b": self.sigma_b,
+            "sigma_theta": self.sigma_theta,
+            "sigma1": self.sigma1,
+            "sigma0": self.sigma0,
+        }
 
     @abstractmethod
     def simulate(self) -> ExperimentResult: ...
@@ -87,7 +89,7 @@ class StaticExperimentSimulator(ExperimentSimulator):
                 "b": b,
             }
         )
-        return ExperimentResult(data=df, params=self.params)
+        return ExperimentResult(data=df, params=self.params())
 
 
 class AdaptiveExperimentSimulator(ExperimentSimulator):
@@ -116,28 +118,32 @@ class AdaptiveExperimentSimulator(ExperimentSimulator):
         self.p_callback = p_callback
         self.n_callback = n_callback
 
-    def simulate(self) -> pd.DataFrame:
-        # Simulate the first experiment
-        n_initial = self.n_callback(None)
-        static = StaticExperimentSimulator(
-            **self.params,
-            n=np.array([n_initial]),
-            p=np.array([self.p_callback(None, n_initial)]),
+    def _run_static(self, n: int, p: float) -> pd.DataFrame:
+        """helper to spin up one StaticExperimentSimulator and return its DataFrame."""
+        sim = StaticExperimentSimulator(
+            **self.params(),
+            n=np.array([n]),
+            p=np.array([p]),
             identifier=self.identifier,
         )
-        expt = static.simulate()
+        return sim.simulate().data
 
-        # simulate the rest of the experiments
-        for j in range(1, self.J):
-            next_n = self.n_callback(expt)
-            static = StaticExperimentSimulator(
-                **self.params,
-                n=np.array([next_n]),
-                p=np.array([self.p_callback(None, next_n)]),
-                identifier=self.identifier,
+    def simulate(self) -> ExperimentResult:
+        dfs = []
+        ratios = []
+        prev = None  # type: ExperimentResult|None
+        for _ in range(self.J):
+            n_next = self.n_callback(prev)
+            p_next = self.p_callback(prev, n_next)
+            dfs.append(self._run_static(n_next, p_next))
+            ratios.append(p_next)
+            # build new aggregate so callbacks see all past data
+            prev = ExperimentResult(
+                data=pd.concat(dfs, ignore_index=True), params=self.params()
             )
-            next_expt = static.simulate()
-            merged_dfs = pd.concat([expt.data, next_expt.data], ignore_index=True)
-            expt = ExperimentResult(data=merged_dfs, params=self.params)
 
-        return expt
+        out = ExperimentResult(
+            data=pd.concat(dfs, ignore_index=True), params=self.params()
+        )
+        out.ratios = ratios
+        return out
